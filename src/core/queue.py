@@ -59,6 +59,16 @@ redis.call('HDEL', ARGV[1], 'lease_token')
 return 1
 """
 
+# KEYS[1]=inflight  ARGV: job_key, job_id, lease_token, lease_seconds
+_EXTEND = _NOW + """
+-- Heartbeat: only the current lease holder may extend.
+if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return 0 end
+-- Reset expiry to now + lease_seconds (not "add to old expiry"), so it can't run away.
+-- XX = only update if the job is already in inflight; never re-add it.
+redis.call('ZADD', KEYS[1], 'XX', now + tonumber(ARGV[4]), ARGV[2])
+return 1
+"""
+
 # KEYS[1]=pending KEYS[2]=inflight  ARGV: job_prefix, batch_size
 _REAP = _NOW + """
 -- Leases whose expiry time has passed: the worker is presumed dead.
@@ -82,6 +92,7 @@ class Queue:
         self._enqueue = client.register_script(_ENQUEUE)
         self._lease = client.register_script(_LEASE)
         self._ack = client.register_script(_ACK)
+        self._extend = client.register_script(_EXTEND)
         self._reap = client.register_script(_REAP)
 
     def enqueue(self, payload: dict, delay_seconds: float = 0) -> str:
@@ -113,6 +124,17 @@ class Queue:
         ok = self._ack(
             keys=[self.inflight_key],
             args=[JOB_PREFIX + job_id, job_id, lease_token],
+        )
+        return ok == 1
+
+    def extend_lease(self, job_id: str, lease_token: str, lease_seconds: float = 30) -> bool:
+        """Heartbeat: push the lease expiry to now + lease_seconds.
+
+        Returns False if this lease is no longer valid (the worker should stop the job).
+        """
+        ok = self._extend(
+            keys=[self.inflight_key],
+            args=[JOB_PREFIX + job_id, job_id, lease_token, lease_seconds],
         )
         return ok == 1
 

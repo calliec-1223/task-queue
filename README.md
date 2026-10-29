@@ -22,6 +22,7 @@ flowchart LR
 ## Features
 
 - **Leases**: a worker that takes a job holds it for a fixed time. If the worker doesn't ack (confirm it finished) before the lease expires, a reaper puts the job back in the queue.
+- **Heartbeats**: a worker running a long job extends its lease every few seconds. If the worker dies, the heartbeats stop and the lease expires.
 - **Lease tokens**: each lease gets a unique token, so a slow worker whose lease already expired can't mark a job done that another worker now owns.
 - **Delayed jobs**: a job can be scheduled to become ready later.
 - **Atomic moves**: every state change runs as a Redis Lua script, so jobs can't be lost between steps.

@@ -74,3 +74,41 @@ def test_stale_worker_cannot_ack_after_lease_expired(r):
     assert q.ack(job_id, token_a) is False  # A's ack is rejected
     assert q.get_job(job_id)["status"] == "leased"  # B still owns it
     assert q.ack(job_id, token_b) is True
+
+
+def test_heartbeat_keeps_slow_job_from_being_reaped(r):
+    """A job that runs longer than one lease stays leased while heartbeats continue."""
+    q = Queue(r)
+    job_id = q.enqueue({})
+    _, token = q.lease(lease_seconds=0.3)
+
+    for _ in range(3):  # 0.6s total: twice the original lease
+        time.sleep(0.2)
+        assert q.extend_lease(job_id, token, lease_seconds=0.3) is True
+        assert q.reap_expired() == 0
+
+    assert q.ack(job_id, token) is True
+
+
+def test_heartbeats_stop_when_worker_crashes(r):
+    """Failure test: worker heartbeats, then dies. Lease expires and job returns."""
+    q = Queue(r)
+    job_id = q.enqueue({})
+    _, token = q.lease(lease_seconds=0.3)
+    q.extend_lease(job_id, token, lease_seconds=0.3)
+
+    time.sleep(0.4)  # worker crashed: no more heartbeats
+    assert q.reap_expired() == 1
+    assert q.lease()[0] == job_id
+
+
+def test_stale_worker_cannot_extend_lease(r):
+    """Failure test: after its lease expired, a worker's heartbeat is rejected."""
+    q = Queue(r)
+    job_id = q.enqueue({})
+    _, token_a = q.lease(lease_seconds=0.2)
+    time.sleep(0.3)
+    q.reap_expired()
+
+    assert q.extend_lease(job_id, token_a) is False  # A learns it lost the job
+    assert r.zscore(q.inflight_key, job_id) is None  # and didn't sneak it back into inflight
