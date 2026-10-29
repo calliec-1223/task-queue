@@ -1,0 +1,2 @@
+redis==5.2.1     # Redis client for Python (talks to the Redis server)
+pytest==8.3.4    # test runner
