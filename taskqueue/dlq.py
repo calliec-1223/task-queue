@@ -4,6 +4,8 @@ Examples:
     python -m taskqueue.dlq list
     python -m taskqueue.dlq replay <job_id>
     python -m taskqueue.dlq replay-all --error "connection refused"
+    python -m taskqueue.dlq discard <job_id>
+    python -m taskqueue.dlq discard-all --error "this task always fails"
 """
 
 import argparse
@@ -25,6 +27,11 @@ def main() -> None:
     many = sub.add_parser("replay-all", help="replay dead jobs, optionally filtered by error")
     many.add_argument("--error", default="", help="only jobs whose last error contains this text")
     many.add_argument("--limit", type=int, default=None)
+    gone = sub.add_parser("discard", help="give up on one dead job (history keeps it)")
+    gone.add_argument("job_id")
+    gone_many = sub.add_parser("discard-all", help="give up on dead jobs, optionally filtered by error")
+    gone_many.add_argument("--error", default="", help="only jobs whose last error contains this text")
+    gone_many.add_argument("--limit", type=int, default=None)
     opts = parser.parse_args()
 
     client = redis.Redis.from_url(config.redis_url())
@@ -35,8 +42,12 @@ def main() -> None:
             print(f"{job['id']}  attempts={job['attempts']}  error={job.get('last_error', '')}")
     elif opts.command == "replay":
         print("replayed" if queue.replay(opts.job_id) else "not in dead-letter queue")
-    else:
+    elif opts.command == "replay-all":
         print(f"replayed {queue.replay_dead(opts.error, limit=opts.limit)} job(s)")
+    elif opts.command == "discard":
+        print("discarded" if queue.discard(opts.job_id) else "not in dead-letter queue")
+    else:
+        print(f"discarded {queue.discard_dead(opts.error, limit=opts.limit)} job(s)")
 
 
 if __name__ == "__main__":

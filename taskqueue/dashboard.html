@@ -168,6 +168,7 @@
     <button data-submit="fail">Submit 2 failing</button>
     <button class="danger" id="kill">Kill a worker</button>
     <button id="replay">Replay dead jobs</button>
+    <button id="discard">Discard dead jobs</button>
     <span class="toast" id="toast" role="status"></span>
   </div>
 
@@ -240,8 +241,9 @@ const ICONS = {
   dead: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="6" fill="var(--critical)"/><path d="M4 4l4 4M8 4l-4 4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>',
   leased: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--series-1)" stroke-width="2"/><path d="M6 1a5 5 0 0 1 0 10z" fill="var(--series-1)"/></svg>',
   pending: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--text-muted)" stroke-width="2"/></svg>',
+  discarded: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="6" fill="var(--text-muted)"/><path d="M3.5 6h5" stroke="var(--surface)" stroke-width="1.6" stroke-linecap="round"/></svg>',
 };
-const LABELS = { done: "Done", dead: "Dead", leased: "Running", pending: "Pending" };
+const LABELS = { done: "Done", dead: "Dead", leased: "Running", pending: "Pending", discarded: "Discarded" };
 
 function ago(ts, now) {
   const s = Math.max(0, Math.round(now - ts));
@@ -463,6 +465,10 @@ document.querySelectorAll("[data-submit]").forEach((b) => b.addEventListener("cl
 $("kill").addEventListener("click", async () => {
   const r = await demo("/demo/kill");
   toast(r.error || `Killing ${r.killed.split("-").slice(-2).join("-")}: watch it turn red`);
+});
+$("discard").addEventListener("click", async () => {
+  const r = await demo("/demo/discard");
+  toast(r.error || `Discarded ${r.discarded} dead job(s); history keeps them`);
 });
 $("replay").addEventListener("click", async () => {
   const r = await demo("/demo/replay");

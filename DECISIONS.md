@@ -198,3 +198,12 @@ Each entry records a choice, the alternatives considered, and why.
 - **Why**: It shows the whole cycle, working → dead → removed, and reuses the "score = time" pattern. Listing workers is one sorted-set read.
 - **Details**: Check-ins come from a separate thread because a busy worker's main thread is stuck inside the task (job heartbeats are only every 10 s). The worker ID has a random suffix so a restarted container doesn't look like the worker that died.
 - **Tradeoffs accepted**: One more structure and a removal rule. The registry is for visibility only; nothing in job processing depends on it.
+
+## 23. Discard dead jobs, and record it in history
+
+- **Decision**: `discard(job_id)` and `discard_dead(error_contains=...)` remove dead jobs from the dead-letter queue and delete their Redis data, writing a `discarded` event in the same atomic script. The history writer sets the job's status to `discarded` with a `discarded_at` time. Batched like replay; only dead jobs can be discarded.
+- **Alternatives**:
+  - *Delete from Redis only*: smallest change, but history would still say `dead`, so it couldn't tell "waiting for a person" from "a person gave up."
+  - *Archive instead of delete*: allows undo, but memory isn't freed until cleanup, and replay already gives a second chance.
+- **Why**: Frees the dead-letter queue right away while keeping an audit trail of what was given up on and when. Every change is still an event.
+- **Tradeoffs accepted**: A schema change (new `discarded` status and column) and one more event type. Neither option deletes history; history is permanent.

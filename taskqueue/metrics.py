@@ -14,6 +14,7 @@ Endpoints:
     POST /demo/submit    } only when DEMO_CONTROLS=1: submit sample jobs,
     POST /demo/kill      } make a worker crash, replay dead jobs. Requires the
     POST /demo/replay    } X-Demo header, so other websites can't trigger them.
+    POST /demo/discard   }
 """
 
 import json
@@ -189,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"killed": victim})
         elif self.path == "/demo/replay":
             self._json(200, {"replayed": q.replay_dead()})
+        elif self.path == "/demo/discard":
+            self._json(200, {"discarded": q.discard_dead()})
         else:
             self._json(404, {"error": "not found"})
 

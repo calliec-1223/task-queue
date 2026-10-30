@@ -333,6 +333,41 @@ local done = (#ids < tonumber(ARGV[4])) and 1 or 0
 return {replayed, start + skipped, done}
 """
 
+# KEYS: dead, events  ARGV: job_prefix, error_contains ("" = all), start_index,
+#                           examine_count, max_discard, job_id ("" = use the filter)
+_DISCARD = _NOW + "local dead_key, events_key = KEYS[1], KEYS[2]\n" + _EMIT + """
+-- Give up on dead jobs for good: remove them from the dead-letter set, delete
+-- their Redis data, and record a 'discarded' event so history says so (history
+-- itself is kept). Same batching as replay, so a large discard never blocks Redis.
+local function discard(id)
+    redis.call('ZREM', dead_key, id)
+    redis.call('DEL', ARGV[1] .. id)
+    emit('discarded', id, {})
+end
+
+if ARGV[6] ~= '' then
+    -- One job by id. ZSCORE is nil if it isn't dead, so live jobs are safe.
+    if not redis.call('ZSCORE', dead_key, ARGV[6]) then return {0, 0, 1} end
+    discard(ARGV[6])
+    return {1, 0, 1}
+end
+
+local start = tonumber(ARGV[3])
+local ids = redis.call('ZRANGE', dead_key, start, start + tonumber(ARGV[4]) - 1)
+local discarded, skipped = 0, 0
+for _, id in ipairs(ids) do
+    local err = redis.call('HGET', ARGV[1] .. id, 'last_error') or ''
+    if discarded < tonumber(ARGV[5]) and string.find(err, ARGV[2], 1, true) then
+        discard(id)
+        discarded = discarded + 1
+    else
+        skipped = skipped + 1
+    end
+end
+local done = (#ids < tonumber(ARGV[4])) and 1 or 0
+return {discarded, start + skipped, done}
+"""
+
 
 class Queue:
     def __init__(
@@ -370,6 +405,7 @@ class Queue:
         self._reap = client.register_script(_REAP)
         self._replay_one = client.register_script(_REPLAY_ONE)
         self._replay_batch = client.register_script(_REPLAY_BATCH)
+        self._discard = client.register_script(_DISCARD)
         self._checkpoint = client.register_script(_CHECKPOINT)
         self._cleanup = client.register_script(_CLEANUP)
         self._worker_beat = client.register_script(_WORKER_BEAT)
@@ -518,6 +554,30 @@ class Queue:
                 args=[JOB_PREFIX, error_contains, start, batch_size, remaining],
             )
             total += replayed
+            if done:
+                break
+        return total
+
+    def discard(self, job_id: str) -> bool:
+        """Give up on one dead job: remove it from the dead-letter queue and Redis.
+        History records it as discarded. Returns False if the job isn't dead."""
+        discarded, _, _ = self._discard(keys=[self.dead_key, self.events_key],
+                                        args=[JOB_PREFIX, "", 0, 1, 1, job_id])
+        return discarded == 1
+
+    def discard_dead(
+        self, error_contains: str = "", batch_size: int = 100, limit: int | None = None
+    ) -> int:
+        """Discard dead jobs whose last error contains `error_contains` ("" = all),
+        in batches like replay_dead. Returns how many were discarded."""
+        total, start = 0, 0
+        while limit is None or total < limit:
+            remaining = limit - total if limit is not None else batch_size
+            discarded, start, done = self._discard(
+                keys=[self.dead_key, self.events_key],
+                args=[JOB_PREFIX, error_contains, start, batch_size, remaining, ""],
+            )
+            total += discarded
             if done:
                 break
         return total

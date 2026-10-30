@@ -181,6 +181,11 @@ class HistoryWriter:
         elif kind == "replayed":
             self._set_job(job_id, ts, status="pending", clear_finished=True)
 
+        elif kind == "discarded":
+            # Someone gave up on this dead job on purpose. History keeps it.
+            sql("""UPDATE jobs SET status = 'discarded', discarded_at = to_timestamp(%s),
+                       updated_at = to_timestamp(%s) WHERE id = %s""", (ts, ts, job_id))
+
         else:
             log.warning("unknown event type %r, skipping", kind)
 

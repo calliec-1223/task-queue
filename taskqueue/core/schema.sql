@@ -47,3 +47,10 @@ CREATE TABLE IF NOT EXISTS dead_events (
 -- Added with job priority. ADD COLUMN IF NOT EXISTS keeps this safe to re-run
 -- on databases created before the column existed.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 0;
+
+-- Added with "discard": a dead job someone deliberately gave up on.
+-- DROP + ADD keeps this safe to re-run on databases with the older rule.
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_status_check;
+ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
+    CHECK (status IN ('pending', 'leased', 'done', 'dead', 'discarded'));
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS discarded_at TIMESTAMPTZ;

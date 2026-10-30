@@ -33,6 +33,7 @@ flowchart LR
 
 - **Retries with backoff and jitter**: a failed job waits a random time between 0 and `base × 2^(attempts−1)` (capped) before retrying, so jobs that fail together don't retry together.
 - **Dead-letter queue**: after `max_attempts` failures, including worker crashes, a job moves to a dead-letter set so poison jobs can't loop forever.
+- **Discard**: jobs that will never succeed can be removed from the dead-letter queue (one, or every job whose error matches). History records them as `discarded`, so nothing is lost.
 - **Dead-letter replay**: after fixing the cause of an outage, replay one dead job or every job whose error matches. Bulk replay runs in small batches so Redis never stalls the workers.
 - **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
 - **Idempotency keys**: submitting a job with the same key twice returns the original job instead of a duplicate. The check and the create are one atomic script, so even simultaneous submissions create one job.
@@ -103,6 +104,7 @@ Inspect and replay the dead-letter queue:
 python -m taskqueue.dlq list
 python -m taskqueue.dlq replay <job_id>
 python -m taskqueue.dlq replay-all --error "connection refused"
+python -m taskqueue.dlq discard-all --error "this task always fails"   # give up for good
 ```
 
 Each worker leases a job, sends heartbeats from a background thread while the job runs, then acks or fails it. Every worker also reaps expired leases, which is safe because reaping is one atomic Lua script. Ctrl-C finishes the current job before exiting.
