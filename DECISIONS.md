@@ -47,3 +47,16 @@ Each entry records a choice, the alternatives considered, and why.
 
 - **Decision**: `tq:<queue>:dead`, with the last error saved on the job.
 - **Why**: Keeps the "score = time" idea, lists the oldest failures first, and makes a later "replay this job" function easy.
+
+## 7. Dead-letter replay: single job, plus batched bulk replay by error
+
+- **Decision**: `replay(job_id)` for one job, and `replay_dead(error_contains=...)` to replay every dead job whose last error matches, in batches.
+- **Alternatives**: *Single job only*: simpler, but after an outage someone would have to replay hundreds of jobs by hand.
+- **Why**: After an outage is fixed, one command replays every job that failed for that reason, which saves operator time.
+- **Tradeoffs accepted**: Redis runs one command or script at a time, so a script that looped over thousands of jobs would stall every worker, including their heartbeats, which could expire healthy leases. Each script call therefore examines at most `batch_size` jobs, and Python loops between calls so other clients get a turn. It's more code than single-job replay.
+
+## 8. Replay resets `attempts` to 0
+
+- **Decision**: A replayed job starts over with a full set of retries.
+- **Alternatives**: *Keep `attempts` and raise `max_attempts`*: keeps an honest total count, but the meaning of `max_attempts` drifts and there are two numbers to explain.
+- **Why**: Redis only needs the current attempt count to decide retry vs. dead-letter. The full failure history will live in PostgreSQL (Phase 2) for debugging.

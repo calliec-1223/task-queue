@@ -1,4 +1,4 @@
-"""Core queue: enqueue, lease, heartbeat, ack, fail, and returning expired leases.
+"""Core queue: enqueue, lease, heartbeat, ack, fail, reaping, and dead-letter replay.
 
 Redis layout (for a queue named "default"):
     tq:job:<id>               hash   -> job data: payload, status, attempts,
@@ -133,6 +133,44 @@ return #ids
 """
 
 
+# KEYS[1]=pending KEYS[2]=dead  ARGV: job_key, job_id
+_REPLAY_ONE = _NOW + """
+-- ZREM returns 0 if the job isn't dead, so live jobs can't be "replayed".
+if redis.call('ZREM', KEYS[2], ARGV[2]) == 0 then return 0 end
+-- Fresh start: full retries again. Past failures will live in PostgreSQL.
+redis.call('HSET', ARGV[1], 'attempts', 0, 'status', 'pending')
+redis.call('ZADD', KEYS[1], now, ARGV[2])
+return 1
+"""
+
+# KEYS[1]=pending KEYS[2]=dead
+# ARGV: job_prefix, error_contains ("" = all), start_index, examine_count, max_replay
+_REPLAY_BATCH = _NOW + """
+-- Look at a limited slice of the dead set, so this script never runs long.
+-- (Redis runs one script at a time; a long one would stall every worker.)
+local start = tonumber(ARGV[3])
+local ids = redis.call('ZRANGE', KEYS[2], start, start + tonumber(ARGV[4]) - 1)
+local replayed, skipped = 0, 0
+for _, id in ipairs(ids) do
+    local job_key = ARGV[1] .. id
+    local err = redis.call('HGET', job_key, 'last_error') or ''
+    -- string.find(..., 1, true) = plain substring search, not a pattern.
+    if replayed < tonumber(ARGV[5]) and string.find(err, ARGV[2], 1, true) then
+        redis.call('ZREM', KEYS[2], id)
+        redis.call('HSET', job_key, 'attempts', 0, 'status', 'pending')
+        redis.call('ZADD', KEYS[1], now, id)
+        replayed = replayed + 1
+    else
+        skipped = skipped + 1
+    end
+end
+-- Replayed jobs left the dead set, so only skipped ones are still ahead of
+-- the next slice. That's where the next call should start.
+local done = (#ids < tonumber(ARGV[4])) and 1 or 0
+return {replayed, start + skipped, done}
+"""
+
+
 class Queue:
     def __init__(
         self,
@@ -156,6 +194,8 @@ class Queue:
         self._extend = client.register_script(_EXTEND)
         self._fail = client.register_script(_FAIL)
         self._reap = client.register_script(_REAP)
+        self._replay_one = client.register_script(_REPLAY_ONE)
+        self._replay_batch = client.register_script(_REPLAY_BATCH)
 
     def enqueue(self, payload: dict, delay_seconds: float = 0, max_attempts: int = 5) -> str:
         """Add a job. It can't be leased until delay_seconds have passed.
@@ -227,6 +267,43 @@ class Queue:
             keys=[self.pending_key, self.inflight_key, self.dead_key],
             args=[JOB_PREFIX, batch_size, self.retry_base, self.retry_cap, *rands],
         )
+
+    def replay(self, job_id: str) -> bool:
+        """Move one dead job back to pending with attempts reset to 0.
+
+        Returns False if the job isn't in the dead-letter set.
+        """
+        ok = self._replay_one(
+            keys=[self.pending_key, self.dead_key],
+            args=[JOB_PREFIX + job_id, job_id],
+        )
+        return ok == 1
+
+    def replay_dead(
+        self, error_contains: str = "", batch_size: int = 100, limit: int | None = None
+    ) -> int:
+        """Replay dead jobs whose last error contains `error_contains` ("" = all).
+
+        Works in batches of `batch_size` so Redis is never blocked for long:
+        other clients get a turn between batches. Returns how many were replayed.
+        """
+        total = 0
+        start = 0
+        while limit is None or total < limit:
+            remaining = limit - total if limit is not None else batch_size
+            replayed, start, done = self._replay_batch(
+                keys=[self.pending_key, self.dead_key],
+                args=[JOB_PREFIX, error_contains, start, batch_size, remaining],
+            )
+            total += replayed
+            if done:
+                break
+        return total
+
+    def list_dead(self, count: int = 20) -> list[dict]:
+        """The oldest dead jobs, with their last error."""
+        ids = self.r.zrange(self.dead_key, 0, count - 1)
+        return [self.get_job(i.decode()) for i in ids]
 
     def get_job(self, job_id: str) -> dict | None:
         data = self.r.hgetall(JOB_PREFIX + job_id)

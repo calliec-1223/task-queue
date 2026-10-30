@@ -29,6 +29,7 @@ flowchart LR
 
 - **Retries with backoff and jitter**: a failed job waits a random time between 0 and `base × 2^(attempts−1)` (capped) before retrying, so jobs that fail together don't retry together.
 - **Dead-letter queue**: after `max_attempts` failures, including worker crashes, a job moves to a dead-letter set so poison jobs can't loop forever.
+- **Dead-letter replay**: after fixing the cause of an outage, replay one dead job or every job whose error matches. Bulk replay runs in small batches so Redis never stalls the workers.
 
 Planned: idempotency, priority.
 
@@ -56,6 +57,14 @@ Submit jobs:
 python -m src.enqueue echo '{"msg": "hello"}'          # runs right away
 python -m src.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
 python -m src.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
+```
+
+Inspect and replay the dead-letter queue:
+
+```bash
+python -m src.dlq list
+python -m src.dlq replay <job_id>
+python -m src.dlq replay-all --error "connection refused"
 ```
 
 Each worker leases a job, sends heartbeats from a background thread while the job runs, then acks or fails it. Every worker also reaps expired leases, which is safe because reaping is one atomic Lua script. Ctrl-C finishes the current job before exiting.
