@@ -37,11 +37,13 @@ Planned: idempotency, priority.
 
 ```bash
 git clone <repo-url> && cd task-queue
-cp .env.example .env              # then fill in values
+cp .env.example .env              # then set POSTGRES_PASSWORD to any strong value
+docker compose up -d --wait       # starts Redis and PostgreSQL
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-docker run -d --name tq-redis -p 6379:6379 redis:7.4   # first time; afterwards: docker start tq-redis
 ```
+
+`docker compose down` stops everything. Data is kept in Docker volumes, so jobs survive restarts.
 
 ## Usage
 

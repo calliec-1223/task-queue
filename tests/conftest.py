@@ -13,7 +13,7 @@ def r():
     try:
         client.ping()
     except redis.ConnectionError:
-        pytest.skip("Redis not running (start it with: docker start tq-redis)")
+        pytest.skip("Redis not running (start it with: docker compose up -d)")
     client.flushdb()
     yield client
     client.flushdb()

@@ -60,3 +60,13 @@ Each entry records a choice, the alternatives considered, and why.
 - **Decision**: A replayed job starts over with a full set of retries.
 - **Alternatives**: *Keep `attempts` and raise `max_attempts`*: keeps an honest total count, but the meaning of `max_attempts` drifts and there are two numbers to explain.
 - **Why**: Redis only needs the current attempt count to decide retry vs. dead-letter. The full failure history will live in PostgreSQL (Phase 2) for debugging.
+
+## 9. Redis persistence: append-only file (AOF), synced every second
+
+- **Decision**: Run Redis with `--appendonly yes`. Redis logs every write to disk and replays the log on restart. The default sync is once per second.
+- **Alternatives**:
+  - *No persistence*: fastest, but a Redis restart loses every queued job.
+  - *Snapshots only (RDB)*: periodic full copies, so a crash can lose minutes of jobs.
+  - *AOF synced on every write*: loses nothing, but much slower.
+- **Why**: A queue that loses jobs on restart breaks the "zero job loss" goal. Syncing every second keeps writes fast.
+- **Tradeoffs accepted**: If the machine itself crashes, up to about 1 second of writes can be lost.
