@@ -50,14 +50,15 @@ def test_backoff_is_capped(r):
 def test_jitter_spreads_out_retries(r):
     """Many jobs failing at once should not all retry at the same moment."""
     q = Queue(r, retry_base_seconds=10)  # real random jitter
+    start = server_now(r)  # measure from before the failures, so tiny delays can't look negative
     for _ in range(50):
         job_id = q.enqueue({})
         _, token = q.lease()
         q.fail(job_id, token, "db down")
 
-    now = server_now(r)
-    delays = [score - now for _, score in r.zrange(q.pending_key, 0, -1, withscores=True)]
-    assert all(0 <= d <= 10 for d in delays)
+    elapsed = server_now(r) - start
+    delays = [score - start for _, score in r.zrange(q.pending_key, 0, -1, withscores=True)]
+    assert all(0 <= d <= 10 + elapsed for d in delays)
     assert max(delays) - min(delays) > 3  # spread out, not bunched together
 
 

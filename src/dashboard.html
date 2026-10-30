@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task Queue Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f3ef;
+    --surface: #fcfcfb;
+    --border: #e2e0da;
+    --grid: #ebe9e3;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --series-1: #2a78d6;   /* completed jobs */
+    --series-2: #eb6834;   /* failed attempts */
+    --good: #0ca30c;
+    --critical: #d03b3b;
+    --serious: #ec835a;
+    --arrow: #b9b7b0;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #121211;
+      --surface: #1a1a19;
+      --border: #2e2e2c;
+      --grid: #262624;
+      --text-primary: #f0efec;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e86;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --arrow: #4a4a46;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --border: #2e2e2c; --grid: #262624;
+    --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --series-1: #3987e5; --series-2: #d95926; --arrow: #4a4a46;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text-primary);
+    font-family: var(--sans); font-size: 14px; line-height: 1.45;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { font-family: var(--mono); font-weight: 500; color: var(--text-muted); font-size: 14px; margin-left: 8px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); margin: 32px 0 10px; font-weight: 600; }
+  .live { font-size: 13px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+  .live.down .dot { background: var(--critical); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+
+  /* Pipeline: how jobs move through the system */
+  .flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 10px; align-items: stretch; }
+  .stage { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .stage-title { font-size: 12px; color: var(--text-muted); font-family: var(--mono); }
+  .stat .n { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; line-height: 1.1; }
+  .stat .label { color: var(--text-secondary); font-size: 13px; }
+  .stat .hint { color: var(--text-muted); font-size: 12px; }
+  .stage.split { flex-direction: row; gap: 16px; }
+  .stage.split .stat { flex: 1; }
+  .arrow { display: flex; align-items: center; color: var(--arrow); font-size: 22px; }
+  .flag { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+  .flag svg { flex: none; }
+
+  .sub { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+  .sub .card { padding: 12px 16px; }
+  .sub .n { font-size: 20px; }
+
+  /* Chart */
+  .chart-card { padding: 16px; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; flex-wrap: wrap; }
+  .legend i { display: inline-block; width: 14px; height: 2px; border-radius: 1px; vertical-align: middle; margin-right: 6px; }
+  .chart-wrap { position: relative; }
+  svg.chart { display: block; width: 100%; height: 220px; overflow: visible; }
+  .chart text { fill: var(--text-muted); font-size: 11px; font-family: var(--sans); }
+  .chart .direct { font-size: 12px; fill: var(--text-secondary); }
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+    white-space: nowrap; opacity: 0; transition: opacity .1s; color: var(--text-primary);
+  }
+  .tooltip .row { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+  .tooltip .row b { color: var(--text-primary); font-variant-numeric: tabular-nums; margin-left: auto; padding-left: 12px; }
+  .tooltip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  details { margin-top: 10px; color: var(--text-secondary); font-size: 13px; }
+  details table { margin-top: 8px; }
+
+  /* Tables */
+  .table-card { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-weight: 500; color: var(--text-muted); padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 9px 16px; border-bottom: 1px solid var(--grid); color: var(--text-secondary); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.id { font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
+  td.task { color: var(--text-primary); font-family: var(--mono); }
+  td.num { font-variant-numeric: tabular-nums; }
+  td.err { font-family: var(--mono); font-size: 12px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status { display: inline-flex; align-items: center; gap: 5px; color: var(--text-primary); white-space: nowrap; }
+  .empty { padding: 20px 16px; color: var(--text-muted); }
+  code { font-family: var(--mono); font-size: 12px; background: var(--bg); padding: 2px 6px; border-radius: 4px; }
+  .notice { padding: 12px 16px; margin-top: 10px; color: var(--text-secondary); font-size: 13px; display: none; }
+
+  @media (max-width: 760px) {
+    .flow { grid-template-columns: 1fr; }
+    .arrow { justify-content: center; transform: rotate(90deg); height: 18px; }
+    .sub { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Task Queue<span id="queue-name">default</span></h1>
+    <div class="live" id="live"><span class="dot"></span><span id="live-text">Connecting…</span></div>
+  </header>
+
+  <h2>Where jobs are right now</h2>
+  <div class="flow">
+    <div class="card stage">
+      <div class="stage-title">pending set</div>
+      <div class="stage split">
+        <div class="stat"><div class="n" id="ready">–</div><div class="label">Ready</div><div class="hint">can run now</div></div>
+        <div class="stat"><div class="n" id="delayed">–</div><div class="label">Waiting</div><div class="hint">delay or retry backoff</div></div>
+      </div>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="card stage">
+      <div class="stage-title">inflight set</div>
+      <div class="stat"><div class="n" id="inflight">–</div><div class="label">Running</div><div class="hint">leased by a worker</div></div>
+    </div>
+    <div class="arrow" aria-hidden="true">→</div>
+    <div class="card stage">
+      <div class="stage-title">finished</div>
+      <div class="stage split">
+        <div class="stat"><div class="n" id="done">–</div><div class="label">Done</div><div class="hint">all time</div></div>
+        <div class="stat"><div class="n" id="dead">–</div><div class="label">Dead-lettered</div><div class="hint" id="dead-hint">gave up after max attempts</div></div>
+      </div>
+    </div>
+  </div>
+  <div class="sub">
+    <div class="card stat"><div class="n" id="backlog">–</div><div class="label">History backlog</div><div class="hint">events waiting to reach PostgreSQL</div></div>
+    <div class="card stat"><div class="n" id="dead-events">–</div><div class="label">Dead history events</div><div class="hint">events that failed to apply 3 times</div></div>
+    <div class="card stat"><div class="n" id="rate">–</div><div class="label">Completed / sec</div><div class="hint">average over the last 10 seconds</div></div>
+  </div>
+  <div class="card notice" id="pg-notice">PostgreSQL is unreachable, so only live queue numbers are shown. Workers keep running; history will catch up when it's back.</div>
+
+  <h2>Last 60 seconds</h2>
+  <div class="card chart-card">
+    <div class="legend">
+      <span><i style="background:var(--series-1)"></i>Jobs completed per second</span>
+      <span><i style="background:var(--series-2)"></i>Failed attempts per second</span>
+    </div>
+    <div class="chart-wrap">
+      <svg class="chart" id="chart" role="img" aria-label="Line chart of jobs completed and attempts failed per second over the last 60 seconds"></svg>
+      <div class="tooltip" id="tooltip"></div>
+    </div>
+    <details>
+      <summary>Show chart data as a table</summary>
+      <table id="chart-table"></table>
+    </details>
+  </div>
+
+  <h2>Recent jobs</h2>
+  <div class="card table-card">
+    <table>
+      <thead><tr><th>Job</th><th>Task</th><th>Status</th><th>Attempts</th><th>Last error</th><th>Updated</th></tr></thead>
+      <tbody id="recent"></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => (n == null ? "–" : Number(n).toLocaleString());
+
+// Status: an icon + a label, never color alone.
+const ICONS = {
+  done: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="6" fill="var(--good)"/><path d="M3.3 6.2l1.8 1.8 3.6-3.8" stroke="#fff" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  dead: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="6" fill="var(--critical)"/><path d="M4 4l4 4M8 4l-4 4" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  leased: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--series-1)" stroke-width="2"/><path d="M6 1a5 5 0 0 1 0 10z" fill="var(--series-1)"/></svg>',
+  pending: '<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--text-muted)" stroke-width="2"/></svg>',
+};
+const LABELS = { done: "Done", dead: "Dead", leased: "Running", pending: "Pending" };
+
+function ago(ts, now) {
+  const s = Math.max(0, Math.round(now - ts));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  return Math.round(s / 3600) + "h ago";
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+}
+
+// ---- Chart -------------------------------------------------------------
+let series = [];  // [{t, done, failed}] for each of the last 60 seconds
+
+function drawChart() {
+  const svg = $("chart");
+  const W = svg.clientWidth, H = svg.clientHeight;
+  const pad = { l: 32, r: 150, t: 8, b: 22 };
+  const w = W - pad.l - pad.r, h = H - pad.t - pad.b;
+  const maxY = Math.max(4, ...series.map((d) => Math.max(d.done, d.failed)));
+  const step = Math.ceil(maxY / 4);
+  const top = step * 4;
+  const x = (i) => pad.l + (i / (series.length - 1)) * w;
+  const y = (v) => pad.t + h - (v / top) * h;
+
+  let out = "";
+  for (let k = 0; k <= 4; k++) {  // recessive grid + y labels
+    const v = k * step, yy = y(v);
+    out += `<line x1="${pad.l}" x2="${pad.l + w}" y1="${yy}" y2="${yy}" stroke="var(--grid)" stroke-width="1"/>`;
+    out += `<text x="${pad.l - 8}" y="${yy + 4}" text-anchor="end">${v}</text>`;
+  }
+  [0, 15, 30, 45, 59].forEach((i) => {  // x labels: seconds ago
+    const s = 59 - i;
+    out += `<text x="${x(i)}" y="${H - 4}" text-anchor="middle">${s === 0 ? "now" : "-" + s + "s"}</text>`;
+  });
+
+  const path = (key) => series.map((d, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(d[key]).toFixed(1)}`).join("");
+  out += `<path d="${path("failed")}" fill="none" stroke="var(--series-2)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  out += `<path d="${path("done")}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+  // Direct labels at the line ends, nudged apart if they'd collide.
+  const last = series[series.length - 1];
+  let yd = y(last.done), yf = y(last.failed);
+  if (Math.abs(yd - yf) < 14) { if (yd <= yf) { yf = yd + 14; } else { yd = yf + 14; } }
+  out += `<text class="direct" x="${pad.l + w + 8}" y="${yd + 4}">Completed ${last.done}/s</text>`;
+  out += `<text class="direct" x="${pad.l + w + 8}" y="${yf + 4}">Failed ${last.failed}/s</text>`;
+
+  out += `<line id="cross" x1="0" x2="0" y1="${pad.t}" y2="${pad.t + h}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3 3" opacity="0"/>`;
+  out += `<rect id="hit" x="${pad.l}" y="${pad.t}" width="${w}" height="${h}" fill="transparent"/>`;
+  svg.innerHTML = out;
+
+  const tip = $("tooltip"), cross = $("cross");
+  $("hit").addEventListener("mousemove", (ev) => {
+    const box = svg.getBoundingClientRect();
+    const i = Math.round(((ev.clientX - box.left - pad.l) / w) * (series.length - 1));
+    const d = series[Math.max(0, Math.min(series.length - 1, i))];
+    const xi = x(series.indexOf(d));
+    cross.setAttribute("x1", xi); cross.setAttribute("x2", xi); cross.setAttribute("opacity", 1);
+    const s = 59 - series.indexOf(d);
+    tip.innerHTML = `<div style="margin-bottom:4px;color:var(--text-muted)">${s === 0 ? "now" : s + " seconds ago"}</div>
+      <div class="row"><i style="background:var(--series-1)"></i>Completed<b>${d.done}</b></div>
+      <div class="row"><i style="background:var(--series-2)"></i>Failed attempts<b>${d.failed}</b></div>`;
+    tip.style.opacity = 1;
+    const left = Math.min(xi + 12, W - tip.offsetWidth);
+    tip.style.left = left + "px"; tip.style.top = pad.t + "px";
+  });
+  $("hit").addEventListener("mouseleave", () => { tip.style.opacity = 0; cross.setAttribute("opacity", 0); });
+}
+
+function drawChartTable() {
+  const rows = series.slice().reverse().filter((d) => d.done || d.failed).slice(0, 20);
+  $("chart-table").innerHTML = "<thead><tr><th>Second</th><th>Completed</th><th>Failed attempts</th></tr></thead><tbody>" +
+    (rows.length ? rows.map((d) => `<tr><td>${new Date(d.t * 1000).toLocaleTimeString()}</td><td class="num">${d.done}</td><td class="num">${d.failed}</td></tr>`).join("")
+                 : '<tr><td colspan="3" class="empty">No activity in the last minute.</td></tr>') + "</tbody>";
+}
+
+// ---- Polling -----------------------------------------------------------
+async function refresh() {
+  let m;
+  try {
+    const res = await fetch("/metrics", { cache: "no-store" });
+    m = await res.json();
+    $("live").classList.remove("down");
+    $("live-text").textContent = "Live · updated " + new Date().toLocaleTimeString();
+  } catch {
+    $("live").classList.add("down");
+    $("live-text").textContent = "Disconnected: is python -m src.metrics running?";
+    return;
+  }
+
+  const qd = m.queue;
+  $("ready").textContent = fmt(qd.ready);
+  $("delayed").textContent = fmt(qd.delayed);
+  $("inflight").textContent = fmt(qd.inflight);
+  $("dead").textContent = fmt(qd.dead);
+  $("backlog").textContent = fmt(qd.history_backlog);
+  $("dead-hint").innerHTML = qd.dead > 0
+    ? `<span class="flag" title="Inspect with: python -m src.dlq list">${ICONS.dead} needs attention</span>`
+    : "gave up after max attempts";
+
+  const hist = m.history;
+  $("pg-notice").style.display = hist ? "none" : "block";
+  if (!hist) return;
+
+  $("done").textContent = fmt(hist.jobs_by_status.done || 0);
+  $("dead-events").textContent = fmt(hist.dead_events);
+
+  const nowSec = Math.floor(m.now);
+  series = [];
+  for (let t = nowSec - 59; t <= nowSec; t++) {
+    series.push({ t, done: hist.done_per_second[t] || 0, failed: hist.failed_per_second[t] || 0 });
+  }
+  const last10 = series.slice(-10).reduce((a, d) => a + d.done, 0) / 10;
+  $("rate").textContent = last10.toFixed(1);
+  drawChart();
+  drawChartTable();
+
+  $("recent").innerHTML = hist.recent.length
+    ? hist.recent.map((j) => `<tr>
+        <td class="id">${esc(j.id.slice(0, 8))}</td>
+        <td class="task">${esc(j.task)}</td>
+        <td><span class="status">${ICONS[j.status] || ""}${LABELS[j.status] || esc(j.status)}</span></td>
+        <td class="num">${j.attempts}</td>
+        <td class="err" title="${esc(j.last_error)}">${esc(j.last_error) || "—"}</td>
+        <td>${ago(j.updated_at, m.now)}</td></tr>`).join("")
+    : `<tr><td colspan="6" class="empty">No jobs yet. Try <code>python -m src.enqueue echo '{"msg": "hi"}' --count 50</code></td></tr>`;
+}
+
+refresh();
+setInterval(refresh, 1000);
+window.addEventListener("resize", () => series.length && drawChart());
+</script>
+</body>
+</html>

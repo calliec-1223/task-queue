@@ -66,6 +66,12 @@ python -m src.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
 python -m src.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
 ```
 
+Watch it live: start the dashboard and open http://localhost:8000. It shows where jobs are right now (ready, waiting, running, done, dead), jobs completed and attempts failed per second over the last minute, and recent jobs with their status and errors. Raw numbers are at http://localhost:8000/metrics as JSON.
+
+```bash
+python -m src.metrics
+```
+
 Inspect and replay the dead-letter queue:
 
 ```bash
