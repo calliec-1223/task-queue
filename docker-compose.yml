@@ -6,6 +6,7 @@ x-app-env: &app-env
   POSTGRES_DB: ${POSTGRES_DB:-taskqueue}
   LEASE_SECONDS: ${LEASE_SECONDS:-30}
   POLL_INTERVAL: ${POLL_INTERVAL:-0.5}
+  POLL_MIN_INTERVAL: ${POLL_MIN_INTERVAL:-0.01}
 
 x-app: &app
   build: .

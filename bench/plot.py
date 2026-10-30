@@ -1,14 +1,12 @@
 """Draw benchmark charts from the newest results file.
 
 Usage:
-    python -m bench.plot                      # newest bench/results/*.json
-    python -m bench.plot bench/results/X.json
+    python -m bench.plot      # newest results for each experiment in bench/results/
 
 Writes PNGs to docs/ for the README.
 """
 
 import json
-import sys
 from pathlib import Path
 
 import matplotlib
@@ -28,6 +26,7 @@ MUTED = "#7a7974"
 GRID = "#ebe9e3"
 SERIES_1 = "#2a78d6"  # blue
 SERIES_2 = "#eb6834"  # orange
+SERIES_3 = "#1baf7a"  # aqua
 
 
 def style(ax, title: str, xlabel: str, ylabel: str) -> None:
@@ -77,16 +76,28 @@ def throughput_chart(data: dict) -> Path:
 
 def latency_chart(data: dict) -> Path:
     rows = data["latency"]
-    polls = sorted({r["poll_interval"] for r in rows}, reverse=True)
+    names = {"fixed-500ms": "Poll every 500 ms", "fixed-50ms": "Poll every 50 ms",
+             "adaptive": "Adaptive (10 → 500 ms)"}
+    modes = [m for m in names if any(r["poll_mode"] == m for r in rows)]
     fig, ax = plt.subplots(figsize=(7.5, 4), facecolor=SURFACE)
-    for poll, color in zip(polls, (SERIES_1, SERIES_2)):
-        pts = sorted((r for r in rows if r["poll_interval"] == poll), key=lambda r: r["workers"])
+    ends = []
+    for mode, color in zip(modes, (SERIES_1, SERIES_2, SERIES_3)):
+        pts = sorted((r for r in rows if r["poll_mode"] == mode), key=lambda r: r["workers"])
         w = [r["workers"] for r in pts]
         p99 = [r["p99_ms"] for r in pts]
-        name = f"Poll every {poll * 1000:.0f} ms"
+        name = names[mode]
         ax.plot(w, p99, color=color, linewidth=2, marker="o", markersize=7,
                 markeredgecolor=SURFACE, markeredgewidth=2, label=name)
-        label_end(ax, w[-1], p99[-1], f"{name}: {p99[-1]:.0f} ms")
+        short = {"fixed-500ms": "500 ms poll", "fixed-50ms": "50 ms poll", "adaptive": "Adaptive"}[mode]
+        ends.append((p99[-1], w[-1], f"{short}: {p99[-1]:.0f} ms"))
+    # End labels, spread apart vertically if values are close (log scale).
+    ends.sort()
+    last_y = None
+    for v, x, text in ends:
+        y = v if last_y is None else max(v, last_y * 1.7)
+        ax.annotate(text, (x, v), xytext=(x * 1.12, y), textcoords="data",
+                    va="center", fontsize=9, color=TEXT_2)
+        last_y = y
     ax.set_xscale("log", base=2)
     ax.set_yscale("log")
     ws = sorted({r["workers"] for r in rows})
@@ -118,11 +129,11 @@ def latency_chart(data: dict) -> Path:
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        path = Path(sys.argv[1])
-    else:
-        path = max((ROOT / "bench" / "results").glob("2*.json"))  # newest timestamped run
-    data = json.loads(path.read_text())
+    # Use the newest run that has each experiment (they may come from separate runs).
+    runs = [json.loads(p.read_text()) for p in sorted((ROOT / "bench" / "results").glob("2*.json"))]
+    data = dict(runs[-1])
+    data["throughput"] = next(r["throughput"] for r in reversed(runs) if r["throughput"])
+    data["latency"] = next(r["latency"] for r in reversed(runs) if r["latency"])
     DOCS.mkdir(exist_ok=True)
     for out in (throughput_chart(data), latency_chart(data)):
         print(f"wrote {out.relative_to(ROOT)}")

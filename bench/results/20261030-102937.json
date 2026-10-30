@@ -1,0 +1,163 @@
+{
+  "started_at": "2026-10-30T17:21:39.644139+00:00",
+  "machine": {
+    "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+    "cpus": 8
+  },
+  "task_seconds": 0.02,
+  "throughput": [],
+  "latency": [
+    {
+      "workers": 1,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12995.599999999999,
+      "p99_ms": 28059.554,
+      "max_ms": 28362.8
+    },
+    {
+      "workers": 2,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 1188.4,
+      "p99_ms": 2166.104,
+      "max_ms": 2205.4
+    },
+    {
+      "workers": 4,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 41.1,
+      "p99_ms": 253.36799999999988,
+      "max_ms": 306.3
+    },
+    {
+      "workers": 8,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 36.2,
+      "p99_ms": 111.70899999999999,
+      "max_ms": 133.3
+    },
+    {
+      "workers": 16,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 40.7,
+      "p99_ms": 202.915,
+      "max_ms": 303.7
+    },
+    {
+      "workers": 1,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 11921.75,
+      "p99_ms": 26830.439,
+      "max_ms": 27119.0
+    },
+    {
+      "workers": 2,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 899.65,
+      "p99_ms": 1918.817,
+      "max_ms": 1963.8
+    },
+    {
+      "workers": 4,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 25.8,
+      "p99_ms": 37.900999999999996,
+      "max_ms": 50.7
+    },
+    {
+      "workers": 8,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 24.5,
+      "p99_ms": 38.90799999999999,
+      "max_ms": 62.6
+    },
+    {
+      "workers": 16,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 23.7,
+      "p99_ms": 30.8,
+      "max_ms": 40.0
+    },
+    {
+      "workers": 1,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12109.4,
+      "p99_ms": 27005.918999999998,
+      "max_ms": 27351.4
+    },
+    {
+      "workers": 2,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 810.45,
+      "p99_ms": 1616.116,
+      "max_ms": 1659.7
+    },
+    {
+      "workers": 4,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 26.0,
+      "p99_ms": 50.20399999999999,
+      "max_ms": 78.4
+    },
+    {
+      "workers": 8,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 25.0,
+      "p99_ms": 62.226999999999954,
+      "max_ms": 166.6
+    },
+    {
+      "workers": 16,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 24.1,
+      "p99_ms": 32.91899999999996,
+      "max_ms": 71.7
+    }
+  ],
+  "idle_load": [
+    {
+      "poll_mode": "fixed-500ms",
+      "idle_workers": 16,
+      "redis_requests_per_second": 144.3
+    },
+    {
+      "poll_mode": "fixed-50ms",
+      "idle_workers": 16,
+      "redis_requests_per_second": 952.1
+    },
+    {
+      "poll_mode": "adaptive",
+      "idle_workers": 16,
+      "redis_requests_per_second": 146.0
+    }
+  ]
+}

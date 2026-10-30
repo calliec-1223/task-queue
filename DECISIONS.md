@@ -104,3 +104,13 @@ Each entry records a choice, the alternatives considered, and why.
   - Failures are counted in a separate Redis hash, not with Redis's built-in delivery count, because that also rises during PostgreSQL outages and would dead-letter good events after a long outage.
   - Connection errors (PostgreSQL down) never count as event failures.
 - **Tradeoffs accepted**: A poison event holds up history for N retry rounds (about N seconds) before it's set aside. Each retry re-applies the good events in its batch, which is safe because the writes are idempotent.
+
+## 13. Adaptive polling for idle workers
+
+- **Decision**: When the queue is empty, a worker waits 10 ms, then doubles the wait after each empty check, up to 500 ms. Finding a job resets the wait to 10 ms.
+- **Alternatives**:
+  - *Fixed 500 ms*: least Redis load, but a job arriving at an idle worker can wait up to 500 ms. Measured p99: 111–253 ms with 4–16 workers.
+  - *Fixed 50 ms*: p99 of 31–39 ms, but 952 Redis commands/sec from 16 idle workers, 6.6× more.
+  - *Fixed 100 ms*: a middle ground that's still a fixed tradeoff.
+- **Why**: Measured, it gets most of 50 ms polling's latency (p99 33–62 ms) at 500 ms polling's idle cost (146 vs 144 commands/sec). It's the same exponential backoff idea as job retries (#5).
+- **Tradeoffs accepted**: Slightly worse p99 than fixed 50 ms right after an idle stretch, because a backed-off worker can be mid-wait (up to 500 ms) when work arrives. Still no true push notification, which is the cost of choosing sorted sets in #2.

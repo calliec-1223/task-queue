@@ -44,10 +44,19 @@ def compose(*args: str, env: dict | None = None) -> None:
     )
 
 
-def set_workers(count: int, poll_interval: float) -> None:
-    """Run exactly `count` worker containers with the given poll interval."""
+# Polling modes: (label, longest idle wait, first idle wait). Equal = fixed interval.
+POLL_MODES = {
+    "fixed-500ms": (0.5, 0.5),
+    "fixed-50ms": (0.05, 0.05),
+    "adaptive": (0.5, 0.01),  # 10 ms, doubling to 500 ms while idle (the default)
+}
+
+
+def set_workers(count: int, mode: str = "adaptive") -> None:
+    """Run exactly `count` worker containers with the given polling mode."""
+    longest, first = POLL_MODES[mode]
     compose("up", "-d", "--wait", "--scale", f"worker={count}", "worker",
-            env={"POLL_INTERVAL": str(poll_interval)})
+            env={"POLL_INTERVAL": str(longest), "POLL_MIN_INTERVAL": str(first)})
     time.sleep(2)  # let every worker finish starting and begin polling
 
 
@@ -92,7 +101,7 @@ def throughput_run(q: Queue, pg, workers: int, jobs: int, task_seconds: float) -
     }
 
 
-def latency_run(q: Queue, pg, workers: int, poll_interval: float, rate: float,
+def latency_run(q: Queue, pg, workers: int, mode: str, rate: float,
                 duration: float, task_seconds: float) -> dict:
     run_id = f"lat-{uuid.uuid4().hex[:8]}"
     payload = {"task": "sleep", "args": {"seconds": task_seconds}, "run": run_id}
@@ -114,7 +123,7 @@ def latency_run(q: Queue, pg, workers: int, poll_interval: float, rate: float,
                  FROM jobs WHERE payload->>'run' = %s) t""", (run_id,),
     ).fetchone()
     return {
-        "workers": workers, "poll_interval": poll_interval, "rate": rate, "jobs": total,
+        "workers": workers, "poll_mode": mode, "rate": rate, "jobs": total,
         "p50_ms": float(p50), "p99_ms": float(p99), "max_ms": float(mx),
     }
 
@@ -122,13 +131,15 @@ def latency_run(q: Queue, pg, workers: int, poll_interval: float, rate: float,
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true", help="small, fast sanity run")
+    parser.add_argument("--skip-throughput", action="store_true",
+                        help="only run the latency experiment")
     opts = parser.parse_args()
 
     task_seconds = 0.02
     if opts.quick:
-        worker_counts, tp_jobs, rate, duration, polls = [1, 4], 100, 50, 4, [0.5]
+        worker_counts, tp_jobs, rate, duration = [1, 4], 100, 50, 4
     else:
-        worker_counts, tp_jobs, rate, duration, polls = [1, 2, 4, 8, 16], 1000, 100, 20, [0.5, 0.05]
+        worker_counts, tp_jobs, rate, duration = [1, 2, 4, 8, 16], 1000, 100, 20
 
     r = redis.Redis.from_url(config.REDIS_URL)
     q = Queue(r, name=config.QUEUE_NAME)
@@ -145,22 +156,22 @@ def main() -> None:
         "throughput": [], "latency": [],
     }
     try:
-        for w in worker_counts:
-            set_workers(w, poll_interval=0.5)
+        for w in ([] if opts.skip_throughput else worker_counts):
+            set_workers(w)
             res = throughput_run(q, pg, w, tp_jobs, task_seconds)
             results["throughput"].append(res)
             print(f"throughput  workers={w:<3} {res['jobs_per_second']:7.1f} jobs/s "
                   f"(ideal {res['ideal_jobs_per_second']:.0f})")
 
-        for poll in polls:
+        for mode in POLL_MODES:
             for w in worker_counts:
-                set_workers(w, poll_interval=poll)
-                res = latency_run(q, pg, w, poll, rate, duration, task_seconds)
+                set_workers(w, mode)
+                res = latency_run(q, pg, w, mode, rate, duration, task_seconds)
                 results["latency"].append(res)
-                print(f"latency     workers={w:<3} poll={poll:<5} p50={res['p50_ms']:8.1f} ms "
+                print(f"latency     workers={w:<3} {mode:<12} p50={res['p50_ms']:8.1f} ms "
                       f"p99={res['p99_ms']:8.1f} ms")
     finally:
-        set_workers(3, poll_interval=0.5)  # back to the normal setup
+        set_workers(3)  # back to the normal setup
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     name = "quick" if opts.quick else datetime.now().strftime("%Y%m%d-%H%M%S")

@@ -110,22 +110,34 @@ All numbers below come from real runs ([raw results](bench/results/)) on an Appl
 
 "Ideal" is workers ÷ 20 ms, assuming zero queue overhead. Efficiency stays around 80% from 1 to 16 workers, so the queue itself isn't the bottleneck at this scale. The gap is most likely fixed per-job overhead in the worker (several Redis round trips per job: lease, read the job, ack; plus starting a heartbeat thread), not yet profiled.
 
-### p99 latency: polling interval matters
+### Latency: adaptive polling gets fast pickup without the idle cost
 
 ![Latency chart](docs/bench-latency.png)
 
-Jobs arrive at a steady 100/sec for 20 seconds. Latency is enqueue → done, timed by the Redis clock on both ends.
+Jobs arrive at a steady 100/sec for 20 seconds. Latency is enqueue → done, timed by the Redis clock on both ends. Cells show p50 / p99.
 
-| Workers | p50 (poll 500 ms) | p99 (poll 500 ms) | p50 (poll 50 ms) | p99 (poll 50 ms) |
-|---|---|---|---|---|
-| 1 | 12,373 ms | 27,608 ms | 11,897 ms | 26,787 ms |
-| 2 | 1,113 ms | 1,997 ms | 769 ms | 1,562 ms |
-| 4 | 42 ms | 350 ms | 26 ms | 40 ms |
-| 8 | 40 ms | 263 ms | 25 ms | 55 ms |
-| 16 | 31 ms | 71 ms | 24 ms | 34 ms |
+| Workers | Poll every 500 ms | Poll every 50 ms | Adaptive (default) |
+|---|---|---|---|
+| 1 | 12,996 / 28,060 ms | 11,922 / 26,830 ms | 12,109 / 27,006 ms |
+| 2 | 1,188 / 2,166 ms | 900 / 1,919 ms | 810 / 1,616 ms |
+| 4 | 41 / 253 ms | 26 / 38 ms | 26 / 50 ms |
+| 8 | 36 / 112 ms | 24 / 39 ms | 25 / 62 ms |
+| 16 | 41 / 203 ms | 24 / 31 ms | 24 / 33 ms |
 
-- 1–2 workers can't keep up with 100 jobs/sec, so the backlog grows and latency is measured in seconds.
-- With enough workers, the **poll interval dominates p99**: an idle worker waits up to that long before checking for new jobs. Polling every 50 ms cut p99 at 4 workers from 350 ms to 40 ms, at the cost of more Redis requests from idle workers. This is the polling tradeoff from [DECISIONS.md](DECISIONS.md) #2, measured.
+Workers can't be notified of new jobs (sorted sets have no blocking pop, [DECISIONS.md](DECISIONS.md) #2), so idle workers poll. A job that arrives while a worker is waiting sits ready until the worker checks again, which is why a fixed 500 ms interval shows up in p99.
+
+Faster polling costs Redis work while workers are idle. Measured with 16 idle workers:
+
+| Polling mode | Redis commands/sec (idle) |
+|---|---|
+| Every 500 ms | 144 |
+| Every 50 ms | 952 |
+| **Adaptive** | **146** |
+
+**Adaptive polling** (the default) waits 10 ms after the queue goes empty and doubles the wait after each empty check, up to 500 ms. Finding a job resets it. That gives roughly the latency of 50 ms polling at the idle cost of 500 ms polling. (Counts include the commands each Lua script runs inside Redis.)
+
+- 1–2 workers can't keep up with 100 jobs/sec, so the backlog grows and latency is measured in seconds in every mode.
+- p99 varies between runs: in an earlier run, 500 ms polling at 16 workers measured 71 ms instead of 203 ms. Compare modes within the same run.
 
 ### Zero job loss while workers are killed
 

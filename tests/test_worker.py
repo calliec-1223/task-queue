@@ -88,3 +88,19 @@ def test_killed_worker_process_loses_no_job(r):
             time.sleep(0.05)
 
     assert q.get_job(job_id)["attempts"] == 2
+
+
+def test_adaptive_poll_backs_off_while_idle_and_resets_after_a_job(r):
+    w = Worker(Queue(r), poll_interval=0.5, min_poll_interval=0.01)
+    wait, waits = w.min_poll_interval, []
+    for _ in range(8):  # empty queue: 10, 20, 40, ... capped at 500 ms
+        waits.append(wait)
+        wait = w.next_wait(wait, found_job=False)
+    assert waits == [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.5, 0.5]
+    assert w.next_wait(0.5, found_job=True) == 0.01  # work arrived: check quickly again
+
+
+def test_equal_intervals_mean_fixed_polling(r):
+    w = Worker(Queue(r), poll_interval=0.5, min_poll_interval=0.5)
+    assert w.next_wait(0.5, found_job=False) == 0.5
+    assert w.next_wait(0.5, found_job=True) == 0.5

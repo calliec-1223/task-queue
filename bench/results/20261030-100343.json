@@ -45,93 +45,93 @@
   "latency": [
     {
       "workers": 1,
-      "poll_interval": 0.5,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 12372.6,
       "p99_ms": 27607.546000000002,
-      "max_ms": 27928.6
+      "max_ms": 27928.6,
+      "poll_mode": "fixed-500ms"
     },
     {
       "workers": 2,
-      "poll_interval": 0.5,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 1112.95,
       "p99_ms": 1997.1139999999998,
-      "max_ms": 2046.5
+      "max_ms": 2046.5,
+      "poll_mode": "fixed-500ms"
     },
     {
       "workers": 4,
-      "poll_interval": 0.5,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 41.9,
       "p99_ms": 349.7999999999998,
-      "max_ms": 430.6
+      "max_ms": 430.6,
+      "poll_mode": "fixed-500ms"
     },
     {
       "workers": 8,
-      "poll_interval": 0.5,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 39.5,
       "p99_ms": 262.65599999999995,
-      "max_ms": 304.3
+      "max_ms": 304.3,
+      "poll_mode": "fixed-500ms"
     },
     {
       "workers": 16,
-      "poll_interval": 0.5,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 30.8,
       "p99_ms": 71.31699999999996,
-      "max_ms": 122.7
+      "max_ms": 122.7,
+      "poll_mode": "fixed-500ms"
     },
     {
       "workers": 1,
-      "poll_interval": 0.05,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 11897.45,
       "p99_ms": 26786.746,
-      "max_ms": 27093.8
+      "max_ms": 27093.8,
+      "poll_mode": "fixed-50ms"
     },
     {
       "workers": 2,
-      "poll_interval": 0.05,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 768.55,
       "p99_ms": 1561.702,
-      "max_ms": 1591.0
+      "max_ms": 1591.0,
+      "poll_mode": "fixed-50ms"
     },
     {
       "workers": 4,
-      "poll_interval": 0.05,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 25.8,
       "p99_ms": 40.101,
-      "max_ms": 63.6
+      "max_ms": 63.6,
+      "poll_mode": "fixed-50ms"
     },
     {
       "workers": 8,
-      "poll_interval": 0.05,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 24.8,
       "p99_ms": 55.2,
-      "max_ms": 95.7
+      "max_ms": 95.7,
+      "poll_mode": "fixed-50ms"
     },
     {
       "workers": 16,
-      "poll_interval": 0.05,
       "rate": 100,
       "jobs": 2000,
       "p50_ms": 23.8,
       "p99_ms": 34.30199999999999,
-      "max_ms": 50.1
+      "max_ms": 50.1,
+      "poll_mode": "fixed-50ms"
     }
   ]
 }

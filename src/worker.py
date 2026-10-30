@@ -7,7 +7,8 @@ Settings come from environment variables:
     REDIS_URL       default redis://localhost:6379/0
     QUEUE_NAME      default "default"
     LEASE_SECONDS   default 30
-    POLL_INTERVAL   default 0.5 (seconds an idle worker waits before polling again)
+    POLL_INTERVAL      default 0.5  (longest an idle worker waits between checks)
+    POLL_MIN_INTERVAL  default 0.01 (first wait after the queue goes empty; doubles up to POLL_INTERVAL)
 """
 
 import logging
@@ -32,6 +33,7 @@ class Worker:
         tasks: dict = TASKS,
         lease_seconds: float = 30,
         poll_interval: float = 0.5,
+        min_poll_interval: float = 0.01,
         reap_interval: float = 1.0,
     ):
         self.queue = queue
@@ -40,7 +42,12 @@ class Worker:
         # Heartbeat 3x per lease, so two heartbeats can be late or lost
         # before the lease expires (the "slack" from DECISIONS.md #3).
         self.heartbeat_interval = lease_seconds / 3
+        # Adaptive polling: when the queue is empty, wait min_poll_interval,
+        # then double the wait after each empty check, up to poll_interval.
+        # Finding a job resets it. Fast pickup while work flows, cheap when idle.
+        # (Set both equal for a fixed interval.)
         self.poll_interval = poll_interval
+        self.min_poll_interval = min(min_poll_interval, poll_interval)
         self.reap_interval = reap_interval
         self._last_reap = 0.0
         self._stopping = False
@@ -51,10 +58,19 @@ class Worker:
         signal.signal(signal.SIGINT, self._request_stop)
         signal.signal(signal.SIGTERM, self._request_stop)
         log.info("worker started")
+        wait = self.min_poll_interval
         while not self._stopping:
-            if not self.run_once():
-                time.sleep(self.poll_interval)  # queue empty: poll again shortly
+            found = self.run_once()
+            if not found:
+                time.sleep(wait)  # queue empty: poll again after a short wait
+            wait = self.next_wait(wait, found)
         log.info("worker stopped")
+
+    def next_wait(self, wait: float, found_job: bool) -> float:
+        """Idle wait before the next check: reset after a job, else double (capped)."""
+        if found_job:
+            return self.min_poll_interval
+        return min(wait * 2, self.poll_interval)
 
     def run_once(self) -> bool:
         """Lease and run at most one job. Returns False if no job was ready."""
@@ -136,6 +152,7 @@ def main() -> None:
         lease_seconds=float(os.environ.get("LEASE_SECONDS", 30)),
         # How long an idle worker waits before checking for jobs again.
         poll_interval=float(os.environ.get("POLL_INTERVAL", 0.5)),
+        min_poll_interval=float(os.environ.get("POLL_MIN_INTERVAL", 0.01)),
     ).run()
 
 
