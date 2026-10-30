@@ -207,3 +207,12 @@ Each entry records a choice, the alternatives considered, and why.
   - *Archive instead of delete*: allows undo, but memory isn't freed until cleanup, and replay already gives a second chance.
 - **Why**: Frees the dead-letter queue right away while keeping an audit trail of what was given up on and when. Every change is still an event.
 - **Tradeoffs accepted**: A schema change (new `discarded` status and column) and one more event type. Neither option deletes history; history is permanent.
+
+## 24. Backpressure: refuse new jobs when the queue is full
+
+- **Decision**: The enqueue script refuses a new job with `QueueFull` once `max_waiting` jobs (ready plus delayed) are waiting; default 100,000. The count and the insert are one atomic step, so concurrent producers can't overshoot. Payloads over 64 KB raise `PayloadTooLarge`. A repeated idempotency key still returns its original job when full, since no new job is created. Redis runs with `maxmemory 512mb` and `noeviction` as a last-resort backstop. Defaults are mine, adjustable per queue.
+- **Alternatives**:
+  - *Make producers wait for space*: no new error handling, but it only moves the backlog into the producers. In Whisk, web requests would hang, which is the problem the queue was built to fix.
+  - *Load shedding by priority*: keeps urgent work flowing, but the most complex, and pushing out already-accepted jobs breaks the promise that an accepted job is never lost.
+- **Why**: Overload becomes visible to the caller, who can respond sensibly (Whisk says "busy, try again in a minute"), and Redis memory, which also holds the history outbox, stays protected.
+- **Tradeoffs accepted**: Every producer must handle `QueueFull`; one that ignores it loses that work.

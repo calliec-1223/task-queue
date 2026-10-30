@@ -40,6 +40,7 @@ flowchart LR
 - **Result checkpoints**: a finished task's result is saved before the ack. If the job is redelivered (the worker crashed or lost its lease before acking), the next worker reuses the result instead of redoing the work.
 - **Permanent errors**: errors that can never succeed (bad input, invalid credentials) skip the retries and go straight to the dead-letter queue. A task lists such error types (`Task(fn, no_retry=(...))`) or raises `PermanentError` itself.
 - **Time limits**: each job has a maximum run time (default 5 minutes). Heartbeats can't extend a lease past it, so a hung task times out and is retried or dead-lettered like any failure. The stuck worker exits and Docker restarts it, since a Python thread can't be killed.
+- **Backpressure**: when too many jobs are waiting (default 100,000), enqueue refuses new ones with `QueueFull` instead of letting Redis run out of memory; payloads over 64 KB are refused too. The check is atomic, so simultaneous producers can't overshoot.
 - **Cleanup**: Redis only keeps what's live. Finished jobs are removed from Redis after 24 hours and dead-lettered jobs after 30 days, in small batches; PostgreSQL keeps the permanent history.
 - **Priority with aging**: higher-priority jobs run first, but each priority level is worth 60 seconds of waiting, so a lower-priority job that has waited long enough catches up and nothing starves. Delayed and retrying jobs wait in a separate set, so priority never lets a job run before its time.
 
