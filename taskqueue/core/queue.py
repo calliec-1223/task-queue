@@ -2,11 +2,13 @@
 
 Redis layout (for a queue named "default"):
     tq:job:<id>               hash   -> job data: payload, status, attempts,
-                                        max_attempts, lease_token, last_error
+                                        max_attempts, lease_token, last_error,
+                                        checkpoint (result saved by a finished attempt)
     tq:default:pending        zset   -> job ids, score = time the job becomes ready
     tq:default:inflight       zset   -> job ids, score = time the lease expires
     tq:default:dead           zset   -> job ids, score = time the job was dead-lettered
     tq:default:events         stream -> history events for PostgreSQL (the "outbox")
+    tq:default:idem:<key>     string -> job id created with this idempotency key (expires)
 
 Every multi-step change runs inside a Lua script so Redis executes it as one
 atomic step: no other client can see or change the data halfway through.
@@ -77,13 +79,33 @@ local function retry_or_dead(job_key, id, rand, event_type, error)
 end
 """
 
-# KEYS: pending, events  ARGV: job_key, job_id, payload_json, delay_seconds, max_attempts, queue_name
+# KEYS: pending, events, idempotency_key ("" if none)
+# ARGV: job_key, job_id, payload_json, delay_seconds, max_attempts, queue_name, idempotency_ttl
 _ENQUEUE = _NOW + "local events_key = KEYS[2]\n" + _EMIT + """
+-- Idempotency: if this key was used before (and hasn't expired), return the
+-- job it created instead of creating a duplicate. Checking and creating happen
+-- in one script, so two simultaneous submissions can't both get through.
+if KEYS[3] ~= '' then
+    local existing = redis.call('GET', KEYS[3])
+    if existing then return existing end
+    redis.call('SET', KEYS[3], ARGV[2], 'EX', tonumber(ARGV[7]))
+end
 redis.call('HSET', ARGV[1], 'id', ARGV[2], 'payload', ARGV[3], 'status', 'pending',
            'attempts', 0, 'max_attempts', ARGV[5], 'created_at', now)
 redis.call('ZADD', KEYS[1], now + tonumber(ARGV[4]), ARGV[2])
 emit('enqueued', ARGV[2], {'queue', ARGV[6], 'payload', ARGV[3], 'max_attempts', ARGV[5]})
-return 1
+return ARGV[2]
+"""
+
+# KEYS: (none)  ARGV: job_key, result_json
+_CHECKPOINT = """
+-- Save a finished task's result, unless an earlier attempt already saved one.
+-- First finisher wins; everyone gets back the same stored result.
+-- No lease-token check on purpose: a worker whose lease expired still did the
+-- work, and its result is valid even though its ack will be rejected.
+if redis.call('EXISTS', ARGV[1]) == 0 then return false end
+redis.call('HSETNX', ARGV[1], 'checkpoint', ARGV[2])
+return redis.call('HGET', ARGV[1], 'checkpoint')
 """
 
 # KEYS: pending, inflight, events  ARGV: job_prefix, lease_seconds, lease_token
@@ -224,19 +246,43 @@ class Queue:
         self._reap = client.register_script(_REAP)
         self._replay_one = client.register_script(_REPLAY_ONE)
         self._replay_batch = client.register_script(_REPLAY_BATCH)
+        self._checkpoint = client.register_script(_CHECKPOINT)
 
-    def enqueue(self, payload: dict, delay_seconds: float = 0, max_attempts: int = 5) -> str:
+    def enqueue(
+        self,
+        payload: dict,
+        delay_seconds: float = 0,
+        max_attempts: int = 5,
+        idempotency_key: str | None = None,
+        idempotency_ttl: int = 86400,
+    ) -> str:
         """Add a job. It can't be leased until delay_seconds have passed.
 
         max_attempts counts every run, including the first.
+        idempotency_key: submitting the same key again (within idempotency_ttl
+        seconds) returns the original job's id instead of creating a duplicate.
         """
         job_id = str(uuid.uuid4())
-        self._enqueue(
-            keys=[self.pending_key, self.events_key],
+        idem = f"tq:{self.name}:idem:{idempotency_key}" if idempotency_key else ""
+        result = self._enqueue(
+            keys=[self.pending_key, self.events_key, idem],
             args=[JOB_PREFIX + job_id, job_id, json.dumps(payload), delay_seconds,
-                  max_attempts, self.name],
+                  max_attempts, self.name, idempotency_ttl],
         )
-        return job_id
+        return result.decode()  # the new job, or the original one for a repeated key
+
+    def get_checkpoint(self, job_id: str) -> tuple[bool, Any]:
+        """(True, result) if an earlier attempt already finished this job's task."""
+        raw = self.r.hget(JOB_PREFIX + job_id, "checkpoint")
+        return (False, None) if raw is None else (True, json.loads(raw))
+
+    def save_checkpoint(self, job_id: str, result: Any) -> Any:
+        """Record a finished task's result. Returns the stored result, which is an
+        earlier attempt's if one finished first, so every attempt reports the same answer."""
+        stored = self._checkpoint(
+            keys=[], args=[JOB_PREFIX + job_id, json.dumps(result, default=str)]
+        )
+        return result if stored is None else json.loads(stored)
 
     def lease(self, lease_seconds: float = 30) -> tuple[str, str] | None:
         """Claim the next ready job for lease_seconds.

@@ -93,7 +93,14 @@ class Worker:
         error = None
         result = None
         try:
-            result = self._run_task(job["payload"])
+            done_before, saved = self.queue.get_checkpoint(job_id)
+            if done_before:
+                # An earlier attempt finished the task but never got its ack in
+                # (crashed or lost its lease). Reuse its result; don't redo the work.
+                log.info("job %s: reusing result from an earlier attempt", job_id)
+                result = saved
+            else:
+                result = self.queue.save_checkpoint(job_id, self._run_task(job["payload"]))
         except Exception as e:  # any error in the task counts as a failed attempt
             error = f"{type(e).__name__}: {e}"
         finally:

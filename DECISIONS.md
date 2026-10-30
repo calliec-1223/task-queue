@@ -140,3 +140,12 @@ Each entry records a choice, the alternatives considered, and why.
 - **Alternatives**: *Store results in Redis on the job*: instant and fast, but a core change plus an expiry rule to keep Redis from filling up, and results would be temporary.
 - **Why**: No core queue changes, and results are kept permanently.
 - **Tradeoffs accepted**: History lags Redis slightly (milliseconds when the writer is keeping up), so answers appear a little later. Whisk needs read access to the queue's database, which couples the two systems.
+
+## 17. Idempotency: keys at enqueue, plus result checkpoints
+
+- **Decision**: Both. (1) `enqueue(..., idempotency_key=...)`: a repeated key within 24 hours returns the original job instead of creating a duplicate. The check and the create happen in the same Lua script. (2) When a task succeeds, the worker saves its result on the job only if no result is saved yet (first finisher wins). Before running a task, a worker checks for a saved result and reuses it instead of redoing the work.
+- **Alternatives**:
+  - *Keys only*: stops duplicate submissions (double-clicks, client retries) but not a job running twice after a lease expiry.
+  - *Checkpoints only*: stops most re-runs but not two separate jobs created by a double submission.
+- **Why**: The queue is at-least-once, so duplicates come from two places, submission and execution. Each needs its own fix.
+- **Limits accepted**: If a worker's lease expires while it's still running, another worker can start the same job at the same time, and both do the work. Checkpoints keep the recorded result consistent (the first finisher's), but only the external service supporting idempotency keys could stop the second call. Exactly-once execution isn't achievable inside the queue. Checkpoints are kept on the job hash in Redis.

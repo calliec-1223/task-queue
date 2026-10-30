@@ -2,7 +2,7 @@
 
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
-> Status: core queue, PostgreSQL history, benchmarks, failure injection, and a real integration with my recipe app are done. In progress: idempotency (duplicate protection) and job priority.
+> Status: core queue, PostgreSQL history, benchmarks, failure injection, and a real integration with my recipe app are done. In progress: job priority.
 
 ## Architecture
 
@@ -33,8 +33,10 @@ flowchart LR
 - **Dead-letter queue**: after `max_attempts` failures, including worker crashes, a job moves to a dead-letter set so poison jobs can't loop forever.
 - **Dead-letter replay**: after fixing the cause of an outage, replay one dead job or every job whose error matches. Bulk replay runs in small batches so Redis never stalls the workers.
 - **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
+- **Idempotency keys**: submitting a job with the same key twice returns the original job instead of a duplicate. The check and the create are one atomic script, so even simultaneous submissions create one job.
+- **Result checkpoints**: a finished task's result is saved before the ack. If the job is redelivered (the worker crashed or lost its lease before acking), the next worker reuses the result instead of redoing the work.
 
-Planned: idempotency, priority.
+Planned: priority.
 
 ## Getting started
 
