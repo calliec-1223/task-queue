@@ -13,6 +13,9 @@ How it stays safe:
   (idempotent), so being delivered twice is harmless.
 - Run exactly one writer per queue: events for the same job must be applied
   in order (e.g. "leased" before "acked").
+- Poison events (bad data that fails every time) can't block history forever.
+  A failing event aborts its batch so it's retried; after max_event_failures
+  tries it's saved to the dead_events table and the batch moves on.
 """
 
 import json
@@ -31,6 +34,10 @@ log = logging.getLogger("history")
 GROUP = "history"
 
 
+class EventFailed(Exception):
+    """One event failed to apply; its batch was rolled back and will be retried."""
+
+
 class HistoryWriter:
     def __init__(
         self,
@@ -39,10 +46,15 @@ class HistoryWriter:
         queue_name: str = "default",
         consumer: str = "writer-1",
         batch_size: int = 100,
+        max_event_failures: int = 3,
     ):
         self.r = client
         self.conn = conn
         self.stream = f"tq:{queue_name}:events"
+        # How many times each event has failed because of its own data.
+        # (Not Redis's delivery count: that also rises during PostgreSQL outages.)
+        self.failures_key = f"tq:{queue_name}:event_failures"
+        self.max_event_failures = max_event_failures
         self.consumer = consumer
         self.batch_size = batch_size
         self._stopping = False
@@ -63,14 +75,40 @@ class HistoryWriter:
             return 0
 
         with self.conn.transaction():  # all events in the batch commit together
-            for _, fields in entries:
-                self._apply({k.decode(): v.decode() for k, v in fields.items()})
+            for entry_id, fields in entries:
+                self._apply_or_dead_letter(entry_id, fields)
 
         # Only now, after the commit, tell Redis they're handled.
         ids = [entry_id for entry_id, _ in entries]
         self.r.xack(self.stream, GROUP, *ids)
         self.r.xdel(self.stream, *ids)  # free the memory; PostgreSQL has them now
+        self.r.hdel(self.failures_key, *ids)  # forget any failure counts
         return len(entries)
+
+    def _apply_or_dead_letter(self, entry_id: bytes, fields: dict) -> None:
+        try:
+            # Nested transaction = SAVEPOINT: if this event fails, only its own
+            # writes are undone, not the rest of the batch.
+            with self.conn.transaction():
+                event = {k.decode(): v.decode() for k, v in fields.items()}
+                self._apply(event)
+        except psycopg.OperationalError:
+            raise  # PostgreSQL itself is down: not this event's fault, don't count it
+        except Exception as e:
+            failures = self.r.hincrby(self.failures_key, entry_id, 1)
+            if failures < self.max_event_failures:
+                # Abort the whole batch; it's redelivered and this event retried.
+                raise EventFailed(f"event {entry_id.decode()} failed ({failures}x): {e}") from e
+            # Failed too many times: set it aside so the events behind it can flow.
+            log.error("dead-lettering event %s after %d failures: %s",
+                      entry_id.decode(), failures, e)
+            raw = {k.decode(errors="replace"): v.decode(errors="replace") for k, v in fields.items()}
+            self.conn.execute(
+                """INSERT INTO dead_events (event_id, stream, fields, error, failures)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (event_id) DO NOTHING""",
+                (entry_id.decode(), self.stream, Jsonb(raw), f"{type(e).__name__}: {e}", failures),
+            )
 
     def run(self) -> None:
         signal.signal(signal.SIGINT, self._request_stop)
@@ -81,11 +119,17 @@ class HistoryWriter:
                 applied = self.process_once(block_ms=1000)
                 if applied:
                     log.info("applied %d event(s)", applied)
+            except EventFailed as e:
+                log.warning("%s; retrying batch", e)
+                time.sleep(1)
             except psycopg.OperationalError as e:
                 # PostgreSQL is down. Events wait safely in Redis; retry soon.
                 log.warning("PostgreSQL unavailable, retrying: %s", e)
                 time.sleep(2)
-                self.conn = db.connect()
+                try:
+                    self.conn = db.connect()
+                except psycopg.OperationalError:
+                    pass  # still down; the next loop tries again
         log.info("history writer stopped")
 
     def _read(self, start_id: str, block_ms: int = 0) -> list:

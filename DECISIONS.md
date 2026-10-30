@@ -91,3 +91,16 @@ Each entry records a choice, the alternatives considered, and why.
 - **How duplicates are handled**: Events are confirmed after the commit, so a writer crash can cause redelivery (at-least-once). Every write is idempotent (`ON CONFLICT DO NOTHING`, or updates that set the same values), so applying an event twice is harmless.
 - **Tradeoffs accepted**: One more process to run. History lags slightly. If the writer is down, events pile up in Redis memory. Exactly one writer per queue, so events for a job are applied in order. Redis's ~1 second disk-sync window (#9) still applies, but state and events are lost together, so they never disagree.
 - **Why Streams here but not for the queue (#2)**: Here Redis only needs to be a reliable ordered log with redelivery, which is exactly what Streams provide. For the queue I wanted to design lease and retry logic myself, and Streams don't support delayed jobs.
+
+## 12. Poison history events: retry N times, then move to `dead_events`
+
+- **Decision**: If one event fails to apply because of its own data, its batch is rolled back and retried. After 3 failures, the event is saved to a `dead_events` table and the batch continues without it.
+- **Alternatives**:
+  - *Dead-letter on the first failure*: simplest, but a one-off glitch would send a good event to `dead_events` and need manual work.
+  - *Log and skip*: almost no code, but the event would be lost from history, breaking #11's promise.
+- **Why**: Brief glitches get another chance, history never stays blocked behind a bad event, and nothing is thrown away. Only events that fail every time need a person.
+- **Details**:
+  - Each event is applied inside a savepoint, so a failing event's writes are undone without losing the rest of the batch.
+  - Failures are counted in a separate Redis hash, not with Redis's built-in delivery count, because that also rises during PostgreSQL outages and would dead-letter good events after a long outage.
+  - Connection errors (PostgreSQL down) never count as event failures.
+- **Tradeoffs accepted**: A poison event holds up history for N retry rounds (about N seconds) before it's set aside. Each retry re-applies the good events in its batch, which is safe because the writes are idempotent.

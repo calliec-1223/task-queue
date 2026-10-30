@@ -32,3 +32,14 @@ CREATE TABLE IF NOT EXISTS job_attempts (
 
 -- Get a job's attempts in order without scanning the whole table.
 CREATE INDEX IF NOT EXISTS job_attempts_job_idx ON job_attempts (job_id, started_at);
+
+-- History events that failed to apply several times (poison events).
+-- Kept so nothing is silently lost; a person can inspect and fix them.
+CREATE TABLE IF NOT EXISTS dead_events (
+    event_id   TEXT PRIMARY KEY,                    -- Redis stream entry id
+    stream     TEXT NOT NULL,
+    fields     JSONB NOT NULL,                      -- the raw event, as received
+    error      TEXT NOT NULL,
+    failures   INT NOT NULL,
+    dead_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
