@@ -27,7 +27,10 @@ flowchart LR
 - **Delayed jobs**: a job can be scheduled to become ready later.
 - **Atomic moves**: every state change runs as a Redis Lua script, so jobs can't be lost between steps.
 
-Planned: retries with exponential backoff, dead-letter queue, idempotency, priority.
+- **Retries with backoff and jitter**: a failed job waits a random time between 0 and `base × 2^(attempts−1)` (capped) before retrying, so jobs that fail together don't retry together.
+- **Dead-letter queue**: after `max_attempts` failures, including worker crashes, a job moves to a dead-letter set so poison jobs can't loop forever.
+
+Planned: idempotency, priority.
 
 ## Getting started
 

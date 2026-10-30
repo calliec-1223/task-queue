@@ -47,7 +47,7 @@ def test_ack_marks_done_and_job_is_not_redelivered(r):
 
 def test_crashed_worker_job_returns_to_queue(r):
     """Failure test: worker leases a job, then dies without acking."""
-    q = Queue(r)
+    q = Queue(r, retry_base_seconds=0)  # no backoff: this test is about leases
     job_id = q.enqueue({"task": "x"})
 
     q.lease(lease_seconds=0.2)  # worker A "crashes": never acks
@@ -63,7 +63,7 @@ def test_crashed_worker_job_returns_to_queue(r):
 
 def test_stale_worker_cannot_ack_after_lease_expired(r):
     """Failure test: slow worker A finishes after its lease expired and B took over."""
-    q = Queue(r)
+    q = Queue(r, retry_base_seconds=0)  # no backoff: this test is about leases
     job_id = q.enqueue({})
 
     _, token_a = q.lease(lease_seconds=0.2)
@@ -92,7 +92,7 @@ def test_heartbeat_keeps_slow_job_from_being_reaped(r):
 
 def test_heartbeats_stop_when_worker_crashes(r):
     """Failure test: worker heartbeats, then dies. Lease expires and job returns."""
-    q = Queue(r)
+    q = Queue(r, retry_base_seconds=0)  # no backoff: this test is about leases
     job_id = q.enqueue({})
     _, token = q.lease(lease_seconds=0.3)
     q.extend_lease(job_id, token, lease_seconds=0.3)

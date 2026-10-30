@@ -25,3 +25,25 @@ Each entry records a choice, the alternatives considered, and why.
   - *Add N to the current expiry*: even a healthy worker's expiry keeps drifting further out, so crashes are detected more slowly the longer a job runs, and it needs an extra cap to stay bounded.
 - **Why**: It reuses the "score = time" mechanism with no new structures, and a crash is always detected within N seconds of the last heartbeat.
 - **Tradeoffs accepted**: Each heartbeat is a round trip to Redis, which adds load with many workers.
+
+## 4. Errors and lease expiries both count as failed attempts
+
+- **Decision**: One rule for every failure. When a worker reports an error (`fail`) or its lease expires (`reap_expired`): if `attempts` < `max_attempts`, retry with backoff; otherwise move the job to the dead-letter set.
+- **Alternatives**:
+  - *Only reported errors count*: simpler, but a poison job that crashes every worker would be requeued forever.
+  - *Separate limits for errors and crashes*: more precise, but two counters and two settings for little gain right now.
+- **Why**: It handles every kind of failure, including poison jobs, with one rule.
+- **Tradeoffs accepted**: A healthy job can be dead-lettered if its workers keep getting killed for unrelated reasons. In Phase 3's kill-workers test, `max_attempts` must be set high enough for that not to happen.
+
+## 5. Exponential backoff with full jitter
+
+- **Decision**: Retry delay = random(0, 1) × min(cap, base × 2^(attempts−1)). Defaults: base 1s, cap 300s.
+- **Alternatives**: *Plain exponential backoff*: predictable, but jobs that fail together retry together.
+- **Why**: Plain backoff doesn't work at production scale. If an outage fails 1,000 jobs at once, they all retry at the same instant and overload the recovering service again (the "thundering herd"). Jitter spreads the retries out.
+- **Tradeoffs accepted**: Retry times are random, so tests either pin the jitter to a fixed value or check a range.
+- **Note**: The random number is chosen in Python and passed into the Lua script, because Redis's Lua `math.random` may not be truly random across calls.
+
+## 6. Dead-letter jobs go in a sorted set scored by time of death
+
+- **Decision**: `tq:<queue>:dead`, with the last error saved on the job.
+- **Why**: Keeps the "score = time" idea, lists the oldest failures first, and makes a later "replay this job" function easy.
