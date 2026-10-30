@@ -39,8 +39,28 @@ git clone <repo-url> && cd task-queue
 cp .env.example .env              # then fill in values
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-docker run -d --name tq-redis -p 6379:6379 redis:7.4
+docker run -d --name tq-redis -p 6379:6379 redis:7.4   # first time; afterwards: docker start tq-redis
 ```
+
+## Usage
+
+Start a worker (run several in separate terminals to scale out):
+
+```bash
+python -m src.worker
+```
+
+Submit jobs:
+
+```bash
+python -m src.enqueue echo '{"msg": "hello"}'          # runs right away
+python -m src.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
+python -m src.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
+```
+
+Each worker leases a job, sends heartbeats from a background thread while the job runs, then acks or fails it. Every worker also reaps expired leases, which is safe because reaping is one atomic Lua script. Ctrl-C finishes the current job before exiting.
+
+Settings (environment variables): `REDIS_URL`, `QUEUE_NAME`, `LEASE_SECONDS`.
 
 ## Design decisions
 
@@ -51,3 +71,5 @@ See [DECISIONS.md](DECISIONS.md).
 ```bash
 pytest
 ```
+
+Tests need Redis running. They use Redis database 15 and wipe it, so they never touch real data. The failure tests include a real worker process killed with `SIGKILL` mid-job, a poison job that crashes every worker, and stale workers trying to ack, fail or heartbeat after losing their lease.
