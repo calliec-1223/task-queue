@@ -9,6 +9,7 @@ x-app-env: &app-env
   POLL_MIN_INTERVAL: ${POLL_MIN_INTERVAL:-0.01}
   DEMO_CONTROLS: ${DEMO_CONTROLS:-0}
   SHUTDOWN_GRACE_SECONDS: ${SHUTDOWN_GRACE_SECONDS:-25}
+  WAKE_MODE: ${WAKE_MODE:-doorbell}
 
 x-app: &app
   build: .

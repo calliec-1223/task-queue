@@ -132,31 +132,32 @@ All numbers below come from real runs ([raw results](bench/results/)) of the cur
 
 "Ideal" is workers ÷ 20 ms, assuming zero queue overhead. Efficiency stays around 80% from 1 to 16 workers, so the queue itself isn't the bottleneck at this scale. The gap is most likely fixed per-job overhead in the worker (several Redis round trips per job: lease, read the job, checkpoint, ack; plus starting a heartbeat thread), not yet profiled.
 
-### Latency: adaptive polling vs. fixed intervals
+### Latency: a doorbell instead of polling
 
 ![Latency chart](docs/bench-latency.png)
 
 Jobs arrive at a steady 100/sec for 20 seconds. Latency is enqueue → done, timed by the Redis clock on both ends. Cells show p50 / p99.
 
-| Workers | Poll every 500 ms | Poll every 50 ms | Adaptive (default) |
-|---|---|---|---|
-| 1 | 12,815 / 28,178 ms | 12,347 / 27,738 ms | 12,820 / 28,277 ms |
-| 2 | 1,313 / 2,540 ms | 984 / 2,050 ms | 1,272 / 2,358 ms |
-| 4 | 46 / 161 ms | 26 / 38 ms | 26 / 155 ms |
-| 8 | 45 / 212 ms | 25 / 33 ms | 26 / 64 ms |
-| 16 | 36 / 186 ms | 24 / 43 ms | 25 / 55 ms |
+| Workers | Poll every 500 ms | Poll every 50 ms | Adaptive polling | Doorbell (default) |
+|---|---|---|---|---|
+| 1 | 12,860 / 28,620 ms | 12,266 / 27,215 ms | 12,611 / 27,428 ms | 12,830 / 30,093 ms |
+| 2 | 1,401 / 2,545 ms | 851 / 1,785 ms | 1,272 / 2,457 ms | 994 / 2,078 ms |
+| 4 | 48 / 226 ms | 26 / 34 ms | 26 / 274 ms | 21 / 23 ms |
+| 8 | 42 / 199 ms | 25 / 33 ms | 25 / 105 ms | 21 / 24 ms |
+| 16 | 36 / 176 ms | 24 / 31 ms | 24 / 34 ms | 21 / 23 ms |
 
-Workers can't be notified of new jobs (sorted sets have no blocking pop, [DECISIONS.md](DECISIONS.md) #2), so idle workers poll. A job that arrives while a worker is waiting sits ready until the worker checks again.
+Sorted sets have no "wait until a job arrives" command ([DECISIONS.md](DECISIONS.md) #2), so workers originally polled. Now, whenever a job becomes ready, the same Lua script also pushes a token onto a **doorbell** list, and idle workers block on `BLPOP` until one arrives (or the next delayed job is due). One token wakes one worker, so there's no thundering herd, and each job's token is used exactly once, so tokens can't go stale. The sorted sets stay the source of truth; the doorbell only says "check now."
 
-Faster polling costs Redis work while workers are idle. Measured with 16 idle workers:
+Measured with 16 idle workers:
 
-| Polling mode | Redis commands/sec (idle) |
+| Wait mode | Redis commands/sec (idle) |
 |---|---|
-| Every 500 ms | 225 |
-| Every 50 ms | 1,566 |
-| **Adaptive** | **228** |
+| Poll every 500 ms | 337 |
+| Poll every 50 ms | 1,667 |
+| Adaptive polling | 338 |
+| **Doorbell** | **293** |
 
-**Adaptive polling** (the default) waits 10 ms after the queue goes empty and doubles the wait after each empty check, up to 500 ms; finding a job resets it. It costs the same idle load as 500 ms polling, about 7× less than 50 ms polling. Its p50 matches 50 ms polling, but its p99 is less consistent: 155 ms at 4 workers in this run (50 ms in an earlier run), because at moderate load a worker can be mid-backoff when work arrives. Counts include the commands each Lua script runs inside Redis.
+The doorbell has the best median and the best, most consistent p99 (about 23 ms at 4, 8 and 16 workers), with the lowest idle load. What remains is each worker's once-a-second check-in, reaping and cleanup, not polling. Counts include the commands each Lua script runs inside Redis.
 
 - 1–2 workers can't keep up with 100 jobs/sec, so the backlog grows and latency is measured in seconds in every mode.
 - p99 varies between runs, so compare modes within the same run.
@@ -200,7 +201,6 @@ These are deliberate tradeoffs or not-yet-built pieces, not bugs:
 - **Redis is a single point of failure.** There's no replica or failover. Redis saves every write to disk once per second, so a restart keeps the queue, but if the whole machine crashes, up to about 1 second of changes can be lost (jobs and their history events are lost together, so they never disagree).
 - **One active history writer per queue.** Events for a job must be applied in order, so only one writer writes at a time (others wait on standby and take over within about 10 s; a fencing token stops a frozen writer from writing late). That caps how fast history can be written; if the writer falls behind, events wait in Redis memory. History writer throughput hasn't been benchmarked yet.
 - **Single Redis server only.** The Lua scripts build some key names inside the script, which Redis Cluster doesn't allow, so scaling past one Redis server would mean redesigning the key layout.
-- **Workers poll.** Sorted sets have no "wait until a job arrives" command, so idle workers check periodically (adaptive backoff, 10–500 ms). That adds some pickup latency and idle Redis load.
 - **At-least-once, not exactly-once.** If a worker freezes long enough to lose its lease but is still alive, another worker can run the same job at the same time. Result checkpoints keep the recorded result consistent, but both runs do the work.
 
 ## Design decisions

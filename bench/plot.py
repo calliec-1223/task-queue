@@ -27,6 +27,7 @@ GRID = "#ebe9e3"
 SERIES_1 = "#2a78d6"  # blue
 SERIES_2 = "#eb6834"  # orange
 SERIES_3 = "#1baf7a"  # aqua
+SERIES_4 = "#eda100"  # yellow
 
 
 def style(ax, title: str, xlabel: str, ylabel: str) -> None:
@@ -77,18 +78,19 @@ def throughput_chart(data: dict) -> Path:
 def latency_chart(data: dict) -> Path:
     rows = data["latency"]
     names = {"fixed-500ms": "Poll every 500 ms", "fixed-50ms": "Poll every 50 ms",
-             "adaptive": "Adaptive (10 → 500 ms)"}
+             "adaptive": "Adaptive polling (10 → 500 ms)", "doorbell": "Doorbell (BLPOP)"}
     modes = [m for m in names if any(r["poll_mode"] == m for r in rows)]
     fig, ax = plt.subplots(figsize=(7.5, 4), facecolor=SURFACE)
     ends = []
-    for mode, color in zip(modes, (SERIES_1, SERIES_2, SERIES_3)):
+    for mode, color in zip(modes, (SERIES_1, SERIES_2, SERIES_3, SERIES_4)):
         pts = sorted((r for r in rows if r["poll_mode"] == mode), key=lambda r: r["workers"])
         w = [r["workers"] for r in pts]
         p99 = [r["p99_ms"] for r in pts]
         name = names[mode]
         ax.plot(w, p99, color=color, linewidth=2, marker="o", markersize=7,
                 markeredgecolor=SURFACE, markeredgewidth=2, label=name)
-        short = {"fixed-500ms": "500 ms poll", "fixed-50ms": "50 ms poll", "adaptive": "Adaptive"}[mode]
+        short = {"fixed-500ms": "500 ms poll", "fixed-50ms": "50 ms poll", "adaptive": "Adaptive",
+                 "doorbell": "Doorbell"}[mode]
         ends.append((p99[-1], w[-1], f"{short}: {p99[-1]:.0f} ms"))
     # End labels, spread apart vertically if values are close (log scale).
     ends.sort()

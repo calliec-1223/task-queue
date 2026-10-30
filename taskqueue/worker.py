@@ -9,6 +9,7 @@ Settings come from environment variables:
     LEASE_SECONDS   default 30
     POLL_INTERVAL      default 0.5  (longest an idle worker waits between checks)
     POLL_MIN_INTERVAL  default 0.01 (first wait after the queue goes empty; doubles up to POLL_INTERVAL)
+    WAKE_MODE          "doorbell" (default: idle workers block until a job is ready) or "poll"
 """
 
 import logging
@@ -50,6 +51,7 @@ class Worker:
         tasks: dict = TASKS,
         lease_seconds: float = 30,
         poll_interval: float = 0.5,
+        wake_mode: str = "doorbell",  # "doorbell" (default) or "poll" (for comparison)
         min_poll_interval: float = 0.01,
         reap_interval: float = 1.0,
         cleanup_interval: float = 60.0,
@@ -69,6 +71,8 @@ class Worker:
         # Finding a job resets it. Fast pickup while work flows, cheap when idle.
         # (Set both equal for a fixed interval.)
         self.poll_interval = poll_interval
+        self.wake_mode = wake_mode
+        self._took_token = False
         self.min_poll_interval = min(min_poll_interval, poll_interval)
         self.reap_interval = reap_interval
         self.cleanup_interval = cleanup_interval
@@ -106,7 +110,13 @@ class Worker:
             while not self._stopping:
                 found = self.run_once()
                 if not found:
-                    time.sleep(wait)  # queue empty: poll again after a short wait
+                    if self.wake_mode == "doorbell":
+                        # Sleep until a job becomes ready (instant wake-up) or the
+                        # next delayed job is due. Capped at 1 s so the worker
+                        # still reaps, cleans up and notices a stop request.
+                        self._took_token = self.queue.wait_for_work(max_wait=1.0)
+                    else:
+                        time.sleep(wait)  # polling: try again after a short wait
                 wait = self.next_wait(wait, found)
         finally:
             self.stop_presence()
@@ -163,7 +173,9 @@ class Worker:
         """Lease and run at most one job. Returns False if no job was ready."""
         self._maybe_reap()
 
-        leased = self.queue.lease(self.lease_seconds)
+        # If the doorbell woke us, we already took this job's token.
+        leased = self.queue.lease(self.lease_seconds, consume_token=not self._took_token)
+        self._took_token = False
         if leased is None:
             return False
         job_id, token = leased
@@ -310,6 +322,7 @@ def main() -> None:
         poll_interval=float(os.environ.get("POLL_INTERVAL", 0.5)),
         min_poll_interval=float(os.environ.get("POLL_MIN_INTERVAL", 0.01)),
         shutdown_grace_seconds=float(os.environ.get("SHUTDOWN_GRACE_SECONDS", 25)),
+        wake_mode=os.environ.get("WAKE_MODE", "doorbell"),
     ).run()
 
 

@@ -44,19 +44,21 @@ def compose(*args: str, env: dict | None = None) -> None:
     )
 
 
-# Polling modes: (label, longest idle wait, first idle wait). Equal = fixed interval.
+# How idle workers wait: (longest idle wait, first idle wait, wake mode).
 POLL_MODES = {
-    "fixed-500ms": (0.5, 0.5),
-    "fixed-50ms": (0.05, 0.05),
-    "adaptive": (0.5, 0.01),  # 10 ms, doubling to 500 ms while idle (the default)
+    "fixed-500ms": (0.5, 0.5, "poll"),
+    "fixed-50ms": (0.05, 0.05, "poll"),
+    "adaptive": (0.5, 0.01, "poll"),        # 10 ms, doubling to 500 ms
+    "doorbell": (0.5, 0.01, "doorbell"),    # block until a job is ready (the default)
 }
 
 
-def set_workers(count: int, mode: str = "adaptive") -> None:
+def set_workers(count: int, mode: str = "doorbell") -> None:
     """Run exactly `count` worker containers with the given polling mode."""
-    longest, first = POLL_MODES[mode]
+    longest, first, wake = POLL_MODES[mode]
     compose("up", "-d", "--wait", "--scale", f"worker={count}", "worker",
-            env={"POLL_INTERVAL": str(longest), "POLL_MIN_INTERVAL": str(first)})
+            env={"POLL_INTERVAL": str(longest), "POLL_MIN_INTERVAL": str(first),
+                 "WAKE_MODE": wake, "DEMO_CONTROLS": "0", "LEASE_SECONDS": "30"})
     time.sleep(2)  # let every worker finish starting and begin polling
 
 

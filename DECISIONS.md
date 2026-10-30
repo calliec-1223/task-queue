@@ -236,3 +236,14 @@ Each entry records a choice, the alternatives considered, and why.
 - **Why**: Short jobs (the common case) finish without repeated work; long ones are handed back without losing an attempt; deploy time stays bounded.
 - **Tradeoffs accepted**: Long jobs are still redone from the start (at-least-once). If a job finishes at the same moment it's released, the token check lets only one win; if the release wins, the next worker reuses the saved result checkpoint instead of redoing it.
 - **Verified**: `docker stop` on a worker running a 40 s job: it waited 25 s, handed the job back, exited with code 0, and another worker took it as attempt 1.
+
+## 27. A doorbell instead of polling (supersedes #13 as the default)
+
+- **Decision**: Whenever a job becomes ready, the shared `schedule()` Lua helper also pushes a token onto `tq:<queue>:wake` (capped at 1,000). Idle workers block on `BLPOP` until a token arrives or the next delayed job is due (at most 1 s, so they still reap and notice stop requests). Each job's token is used exactly once: by the worker the doorbell woke, or by the lease script when a busy worker grabs the job directly. Polling remains available (`WAKE_MODE=poll`) for comparison.
+- **Alternatives**:
+  - *Publish/subscribe*: nothing stored, but every idle worker wakes for every job (thundering herd), and messages sent while a worker is mid-check are lost.
+  - *Redis keyspace notifications*: no script changes, but the same herd and lost-message problems, plus a server setting that's off by default.
+- **Why**: One job wakes one worker, waiting workers send nothing, and the sorted sets stay the source of truth, so a missed or extra token is harmless.
+- **A bug found by measuring**: my first version only removed tokens when idle workers popped them. Under moderate load, busy workers grabbed jobs directly, tokens piled up at the 1,000 cap, and `BLPOP` never actually waited. The fix was making the lease script consume a token too. Found by watching the list length during a benchmark (pinned at 1,000), not by tests; there's now a regression test.
+- **Result**: p50 21 ms and p99 about 23 ms at 4–16 workers, the best and most consistent of all modes, with the lowest idle load (293 vs 338 adaptive and 1,667 for 50 ms polling, 16 workers).
+- **Tradeoffs accepted**: Each waiting worker holds a Redis connection. A worker that takes a token and crashes before leasing loses it; the 1 s wait cap bounds the delay. The doorbell key is derived inside the script, like the job keys (single-Redis limitation).

@@ -1,0 +1,213 @@
+{
+  "started_at": "2026-10-30T22:36:37.433464+00:00",
+  "machine": {
+    "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+    "cpus": 8
+  },
+  "task_seconds": 0.02,
+  "throughput": [],
+  "latency": [
+    {
+      "workers": 1,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12860.5,
+      "p99_ms": 28620.165,
+      "max_ms": 28934.9
+    },
+    {
+      "workers": 2,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 1401.0,
+      "p99_ms": 2544.527,
+      "max_ms": 2590.2
+    },
+    {
+      "workers": 4,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 47.650000000000006,
+      "p99_ms": 226.1419999999999,
+      "max_ms": 291.8
+    },
+    {
+      "workers": 8,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 42.150000000000006,
+      "p99_ms": 198.84899999999993,
+      "max_ms": 275.7
+    },
+    {
+      "workers": 16,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 35.5,
+      "p99_ms": 175.9499999999999,
+      "max_ms": 255.7
+    },
+    {
+      "workers": 1,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12265.650000000001,
+      "p99_ms": 27214.747,
+      "max_ms": 27509.2
+    },
+    {
+      "workers": 2,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 851.15,
+      "p99_ms": 1785.014,
+      "max_ms": 1823.8
+    },
+    {
+      "workers": 4,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 26.0,
+      "p99_ms": 33.900999999999996,
+      "max_ms": 50.4
+    },
+    {
+      "workers": 8,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 24.6,
+      "p99_ms": 32.7,
+      "max_ms": 43.8
+    },
+    {
+      "workers": 16,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 23.7,
+      "p99_ms": 31.3,
+      "max_ms": 36.0
+    },
+    {
+      "workers": 1,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12610.75,
+      "p99_ms": 27427.862,
+      "max_ms": 27736.6
+    },
+    {
+      "workers": 2,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 1272.1999999999998,
+      "p99_ms": 2457.214,
+      "max_ms": 2511.1
+    },
+    {
+      "workers": 4,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 26.2,
+      "p99_ms": 274.1749999999999,
+      "max_ms": 348.3
+    },
+    {
+      "workers": 8,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 24.8,
+      "p99_ms": 104.66599999999988,
+      "max_ms": 206.4
+    },
+    {
+      "workers": 16,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 23.9,
+      "p99_ms": 34.001,
+      "max_ms": 52.9
+    },
+    {
+      "workers": 1,
+      "poll_mode": "doorbell",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12830.35,
+      "p99_ms": 30092.523999999998,
+      "max_ms": 30454.1
+    },
+    {
+      "workers": 2,
+      "poll_mode": "doorbell",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 994.0,
+      "p99_ms": 2078.201,
+      "max_ms": 2124.0
+    },
+    {
+      "workers": 4,
+      "poll_mode": "doorbell",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 21.2,
+      "p99_ms": 23.2,
+      "max_ms": 28.4
+    },
+    {
+      "workers": 8,
+      "poll_mode": "doorbell",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 21.3,
+      "p99_ms": 23.5,
+      "max_ms": 25.3
+    },
+    {
+      "workers": 16,
+      "poll_mode": "doorbell",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 21.3,
+      "p99_ms": 23.4,
+      "max_ms": 26.5
+    }
+  ],
+  "idle_load": [
+    {
+      "poll_mode": "fixed-500ms",
+      "idle_workers": 16,
+      "redis_requests_per_second": 336.7
+    },
+    {
+      "poll_mode": "fixed-50ms",
+      "idle_workers": 16,
+      "redis_requests_per_second": 1667.4
+    },
+    {
+      "poll_mode": "adaptive",
+      "idle_workers": 16,
+      "redis_requests_per_second": 338.1
+    },
+    {
+      "poll_mode": "doorbell",
+      "idle_workers": 16,
+      "redis_requests_per_second": 293.4
+    }
+  ]
+}

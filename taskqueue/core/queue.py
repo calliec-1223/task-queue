@@ -11,6 +11,7 @@ Redis layout (for a queue named "default"):
     tq:default:inflight       zset   -> job ids, score = time the lease expires
     tq:default:dead           zset   -> job ids, score = time the job was dead-lettered
     tq:default:finished       zset   -> done job ids, score = time finished (cleanup() removes old ones)
+    tq:default:wake           list   -> doorbell: one token per job that became ready; idle workers BLPOP it
     tq:default:workers        zset   -> worker ids, score = last time the worker checked in
     tq:default:worker:<id>    hash   -> that worker's status: host, current job, jobs done/failed
     tq:default:events         stream -> history events for PostgreSQL (the "outbox")
@@ -68,6 +69,8 @@ end
 # Expects locals: now, delayed_key, ready_key, config_key.
 _SCHEDULE = """
 local step = tonumber(redis.call('HGET', config_key, 'priority_step') or '60')
+-- The doorbell list sits next to the ready set (tq:<queue>:wake).
+local wake_key = string.gsub(ready_key, 'ready$', 'wake')
 
 local function schedule(job_key, id, ready_at)
     if ready_at > now then
@@ -78,6 +81,11 @@ local function schedule(job_key, id, ready_at)
         -- waiting, so higher priority sorts earlier but can't starve the rest.
         local priority = tonumber(redis.call('HGET', job_key, 'priority') or '0')
         redis.call('ZADD', ready_key, ready_at - priority * step, id)
+        -- Ring the doorbell: one token wakes one idle worker (BLPOP). The
+        -- sorted sets stay the source of truth; the list is just a wake-up
+        -- signal, capped so tokens can't pile up while every worker is busy.
+        redis.call('LPUSH', wake_key, '1')
+        redis.call('LTRIM', wake_key, 0, 999)
     end
 end
 
@@ -226,7 +234,8 @@ redis.call('HSETNX', ARGV[1], 'checkpoint', ARGV[2])
 return redis.call('HGET', ARGV[1], 'checkpoint')
 """
 
-# KEYS: delayed, ready, config, inflight, events  ARGV: job_prefix, lease_seconds, lease_token
+# KEYS: delayed, ready, config, inflight, events
+# ARGV: job_prefix, lease_seconds, lease_token, consume_token ('1' or '0')
 _LEASE = _NOW + """
 local delayed_key, ready_key, config_key, events_key = KEYS[1], KEYS[2], KEYS[3], KEYS[5]
 """ + _EMIT + _SCHEDULE + """
@@ -236,6 +245,11 @@ promote_due(ARGV[1], 1000)
 local popped = redis.call('ZPOPMIN', ready_key)
 if #popped == 0 then return false end
 local id = popped[1]
+-- Keep doorbell tokens in step with ready jobs: each job's token is used once.
+-- A worker woken by the doorbell already took it (consume_token = 0); a busy
+-- worker grabbing the next job directly takes it here. Otherwise tokens pile
+-- up and idle workers spin through stale ones instead of sleeping.
+if ARGV[4] == '1' then redis.call('LPOP', wake_key) end
 local job_key = ARGV[1] .. id
 -- Move ready -> inflight. Score is the lease expiry time, but never past the
 -- job's time limit (start + timeout), so a hung task can't run forever.
@@ -419,6 +433,7 @@ class Queue:
         self.dead_key = f"tq:{name}:dead"
         self.finished_key = f"tq:{name}:finished"
         self.workers_key = f"tq:{name}:workers"
+        self.wake_key = f"tq:{name}:wake"
         self.worker_prefix = f"tq:{name}:worker:"
         self.events_key = f"tq:{name}:events"
         self.retry_base = retry_base_seconds
@@ -498,7 +513,7 @@ class Queue:
         )
         return result if stored is None else json.loads(stored)
 
-    def lease(self, lease_seconds: float = 30) -> tuple[str, str] | None:
+    def lease(self, lease_seconds: float = 30, consume_token: bool = True) -> tuple[str, str] | None:
         """Claim the next ready job for lease_seconds.
 
         Returns (job_id, lease_token), or None if nothing is ready.
@@ -508,7 +523,7 @@ class Queue:
         job_id = self._lease(
             keys=[self.delayed_key, self.ready_key, self.config_key, self.inflight_key,
                   self.events_key],
-            args=[JOB_PREFIX, lease_seconds, token],
+            args=[JOB_PREFIX, lease_seconds, token, "1" if consume_token else "0"],
         )
         if job_id is None:
             return None
@@ -676,6 +691,20 @@ class Queue:
             w["alive"] = w["seconds_since_seen"] <= dead_after
             workers.append(w)
         return workers
+
+    def wait_for_work(self, max_wait: float = 5.0) -> bool:
+        """Idle wait: block until the doorbell rings (a job became ready) or the
+        next delayed job is due, whichever comes first, at most max_wait seconds.
+        Returns True if woken by the doorbell, meaning this caller took a token:
+        pass consume_token=False to its next lease() so the token isn't counted twice."""
+        timeout = max_wait
+        due = self.r.zrange(self.delayed_key, 0, 0, withscores=True)
+        if due:
+            sec, usec = self.r.time()
+            timeout = min(max_wait, max(0.0, due[0][1] - (sec + usec / 1_000_000)))
+        if timeout <= 0.01:
+            return False  # a delayed job is due now: go lease it
+        return self.r.blpop([self.wake_key], timeout=timeout) is not None
 
     def count_waiting(self) -> int:
         """Jobs not yet leased: ready now, or waiting on a delay or backoff."""
