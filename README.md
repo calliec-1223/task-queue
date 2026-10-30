@@ -2,7 +2,7 @@
 
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
-> Status: Phase 2 complete (core queue, PostgreSQL history, Docker Compose, live dashboard). Next: load testing and failure-injection benchmarks.
+> Status: Phase 3 complete: benchmarks and failure-injection results below. Next: integrating with Whisk.
 
 ## Architecture
 
@@ -91,6 +91,53 @@ python -m src.dlq replay-all --error "connection refused"
 Each worker leases a job, sends heartbeats from a background thread while the job runs, then acks or fails it. Every worker also reaps expired leases, which is safe because reaping is one atomic Lua script. Ctrl-C finishes the current job before exiting.
 
 Settings (environment variables): `REDIS_URL`, `QUEUE_NAME`, `LEASE_SECONDS`.
+
+## Benchmarks
+
+All numbers below come from real runs ([raw results](bench/results/)) on an Apple M2 MacBook (8 cores), with every service running in Docker Compose. Workers run 20 ms jobs (`sleep`), standing in for I/O-bound work like an API call.
+
+### Throughput scales almost linearly with workers
+
+![Throughput chart](docs/bench-throughput.png)
+
+| Workers | Jobs/sec | Ideal | Efficiency |
+|---|---|---|---|
+| 1 | 39 | 50 | 78% |
+| 2 | 84 | 100 | 84% |
+| 4 | 172 | 200 | 86% |
+| 8 | 327 | 400 | 82% |
+| 16 | 642 | 800 | 80% |
+
+"Ideal" is workers ÷ 20 ms, assuming zero queue overhead. Efficiency stays around 80% from 1 to 16 workers, so the queue itself isn't the bottleneck at this scale. The gap is most likely fixed per-job overhead in the worker (several Redis round trips per job: lease, read the job, ack; plus starting a heartbeat thread), not yet profiled.
+
+### p99 latency: polling interval matters
+
+![Latency chart](docs/bench-latency.png)
+
+Jobs arrive at a steady 100/sec for 20 seconds. Latency is enqueue → done, timed by the Redis clock on both ends.
+
+| Workers | p50 (poll 500 ms) | p99 (poll 500 ms) | p50 (poll 50 ms) | p99 (poll 50 ms) |
+|---|---|---|---|---|
+| 1 | 12,373 ms | 27,608 ms | 11,897 ms | 26,787 ms |
+| 2 | 1,113 ms | 1,997 ms | 769 ms | 1,562 ms |
+| 4 | 42 ms | 350 ms | 26 ms | 40 ms |
+| 8 | 40 ms | 263 ms | 25 ms | 55 ms |
+| 16 | 31 ms | 71 ms | 24 ms | 34 ms |
+
+- 1–2 workers can't keep up with 100 jobs/sec, so the backlog grows and latency is measured in seconds.
+- With enough workers, the **poll interval dominates p99**: an idle worker waits up to that long before checking for new jobs. Polling every 50 ms cut p99 at 4 workers from 350 ms to 40 ms, at the cost of more Redis requests from idle workers. This is the polling tradeoff from [DECISIONS.md](DECISIONS.md) #2, measured.
+
+### Zero job loss while workers are killed
+
+`python -m bench.chaos` submits 1,000 jobs while repeatedly `SIGKILL`ing random worker containers and the history writer (no chance to clean up), restarting them a second later.
+
+| Jobs submitted | Completed | Lost | Worker kills | History writer kills | Jobs interrupted mid-run | Recorded done twice |
+|---|---|---|---|---|---|---|
+| 1,000 | 1,000 | **0** | 20 | 5 | 11 | 0 |
+
+Interrupted jobs were recovered by lease expiry and finished on a later attempt. Some kills hit idle workers, which is why there are fewer interrupted jobs than kills. Every job also appears exactly once in PostgreSQL history, despite the history writer being killed 5 times.
+
+Reproduce: `docker compose up -d --build`, then `python -m bench.benchmark`, `python -m bench.chaos`, and `python -m bench.plot`.
 
 ## Design decisions
 

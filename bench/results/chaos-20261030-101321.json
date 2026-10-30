@@ -1,0 +1,21 @@
+{
+  "started_at": "2026-10-30T17:11:08.273435+00:00",
+  "finished_at": "2026-10-30T17:13:18.324441+00:00",
+  "run_id": "chaos-7fdb72de",
+  "submitted": 1000,
+  "recorded_in_history": 1000,
+  "completed": 1000,
+  "dead_lettered": 0,
+  "unfinished": 0,
+  "still_in_redis": 0,
+  "lost": 0,
+  "worker_kills": 20,
+  "history_writer_kills": 5,
+  "attempts_interrupted_by_kill": 11,
+  "jobs_interrupted_at_least_once": 11,
+  "jobs_recorded_done_twice": 0,
+  "left_in_redis": {
+    "pending": 0,
+    "inflight": 0
+  }
+}

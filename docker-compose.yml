@@ -5,6 +5,7 @@ x-app-env: &app-env
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
   POSTGRES_DB: ${POSTGRES_DB:-taskqueue}
   LEASE_SECONDS: ${LEASE_SECONDS:-30}
+  POLL_INTERVAL: ${POLL_INTERVAL:-0.5}
 
 x-app: &app
   build: .

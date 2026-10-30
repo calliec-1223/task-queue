@@ -7,6 +7,7 @@ Settings come from environment variables:
     REDIS_URL       default redis://localhost:6379/0
     QUEUE_NAME      default "default"
     LEASE_SECONDS   default 30
+    POLL_INTERVAL   default 0.5 (seconds an idle worker waits before polling again)
 """
 
 import logging
@@ -130,7 +131,12 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     client = redis.Redis.from_url(config.REDIS_URL)
     queue = Queue(client, name=config.QUEUE_NAME)
-    Worker(queue, lease_seconds=float(os.environ.get("LEASE_SECONDS", 30))).run()
+    Worker(
+        queue,
+        lease_seconds=float(os.environ.get("LEASE_SECONDS", 30)),
+        # How long an idle worker waits before checking for jobs again.
+        poll_interval=float(os.environ.get("POLL_INTERVAL", 0.5)),
+    ).run()
 
 
 if __name__ == "__main__":
