@@ -1,6 +1,6 @@
 import time
 
-from src.core.queue import Queue
+from taskqueue.core.queue import Queue
 
 
 def server_now(r):

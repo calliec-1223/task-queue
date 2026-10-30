@@ -27,8 +27,8 @@ from pathlib import Path
 
 import redis
 
-from src import config, db
-from src.core.queue import Queue
+from taskqueue import config, db
+from taskqueue.core.queue import Queue
 
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "bench" / "results"
@@ -68,6 +68,7 @@ def killer(stop: threading.Event, log: list) -> None:
 
 
 def main() -> None:
+    config.load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true")
     opts = parser.parse_args()
@@ -75,8 +76,8 @@ def main() -> None:
     # job = ~14 jobs/s), so the test measures crash recovery, not overload.
     jobs, rate = (150, 8) if opts.quick else (1000, 8)
 
-    r = redis.Redis.from_url(config.REDIS_URL)
-    q = Queue(r, name=config.QUEUE_NAME)
+    r = redis.Redis.from_url(config.redis_url())
+    q = Queue(r, name=config.queue_name())
     if r.zcard(q.pending_key) or r.zcard(q.inflight_key):
         raise SystemExit("queue isn't empty; wait for it to drain first")
     pg = db.connect()

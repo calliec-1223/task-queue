@@ -64,28 +64,28 @@ pip install -r requirements-dev.txt
 With Docker Compose running, workers and the history writer are already up. To run them directly on your machine instead (e.g. while developing):
 
 ```bash
-python -m src.worker
-python -m src.history
+python -m taskqueue.worker
+python -m taskqueue.history
 ```
 
 Submit jobs:
 
 ```bash
-python -m src.enqueue echo '{"msg": "hello"}'          # runs right away
-python -m src.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
-python -m src.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
+python -m taskqueue.enqueue echo '{"msg": "hello"}'          # runs right away
+python -m taskqueue.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
+python -m taskqueue.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
 ```
 
 Watch it live at http://localhost:8000. It shows where jobs are right now (ready, waiting, running, done, dead), jobs completed and attempts failed per second over the last minute, and recent jobs with their status and errors. Raw numbers are at http://localhost:8000/metrics as JSON.
 
-Started by Docker Compose, or directly with `python -m src.metrics`.
+Started by Docker Compose, or directly with `python -m taskqueue.metrics`.
 
 Inspect and replay the dead-letter queue:
 
 ```bash
-python -m src.dlq list
-python -m src.dlq replay <job_id>
-python -m src.dlq replay-all --error "connection refused"
+python -m taskqueue.dlq list
+python -m taskqueue.dlq replay <job_id>
+python -m taskqueue.dlq replay-all --error "connection refused"
 ```
 
 Each worker leases a job, sends heartbeats from a background thread while the job runs, then acks or fails it. Every worker also reaps expired leases, which is safe because reaping is one atomic Lua script. Ctrl-C finishes the current job before exiting.

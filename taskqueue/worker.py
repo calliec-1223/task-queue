@@ -1,7 +1,7 @@
 """Worker process: leases jobs, runs them, and reports the result.
 
 Run it with:
-    python -m src.worker
+    python -m taskqueue.worker
 
 Settings come from environment variables:
     REDIS_URL       default redis://localhost:6379/0
@@ -19,9 +19,9 @@ import time
 
 import redis
 
-from src import config
-from src.core.queue import Queue
-from src.tasks import TASKS
+from taskqueue import config
+from taskqueue.core.queue import Queue
+from taskqueue.tasks import TASKS
 
 log = logging.getLogger("worker")
 
@@ -144,9 +144,10 @@ class Worker:
 
 
 def main() -> None:
+    config.load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    client = redis.Redis.from_url(config.REDIS_URL)
-    queue = Queue(client, name=config.QUEUE_NAME)
+    client = redis.Redis.from_url(config.redis_url())
+    queue = Queue(client, name=config.queue_name())
     Worker(
         queue,
         lease_seconds=float(os.environ.get("LEASE_SECONDS", 30)),

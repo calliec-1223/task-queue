@@ -1,6 +1,6 @@
-from src.core.queue import Queue
-from src.history import HistoryWriter
-from src.metrics import collect
+from taskqueue.core.queue import Queue
+from taskqueue.history import HistoryWriter
+from taskqueue.metrics import collect
 
 
 def test_queue_counts_come_from_redis(r):

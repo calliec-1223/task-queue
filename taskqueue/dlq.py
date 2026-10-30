@@ -1,20 +1,21 @@
 """Inspect and replay the dead-letter queue from the command line.
 
 Examples:
-    python -m src.dlq list
-    python -m src.dlq replay <job_id>
-    python -m src.dlq replay-all --error "connection refused"
+    python -m taskqueue.dlq list
+    python -m taskqueue.dlq replay <job_id>
+    python -m taskqueue.dlq replay-all --error "connection refused"
 """
 
 import argparse
 
 import redis
 
-from src import config
-from src.core.queue import Queue
+from taskqueue import config
+from taskqueue.core.queue import Queue
 
 
 def main() -> None:
+    config.load_dotenv()
     parser = argparse.ArgumentParser(description="Dead-letter queue tools.")
     sub = parser.add_subparsers(dest="command", required=True)
     list_cmd = sub.add_parser("list", help="show the oldest dead jobs")
@@ -26,8 +27,8 @@ def main() -> None:
     many.add_argument("--limit", type=int, default=None)
     opts = parser.parse_args()
 
-    client = redis.Redis.from_url(config.REDIS_URL)
-    queue = Queue(client, name=config.QUEUE_NAME)
+    client = redis.Redis.from_url(config.redis_url())
+    queue = Queue(client, name=config.queue_name())
 
     if opts.command == "list":
         for job in queue.list_dead(opts.count):

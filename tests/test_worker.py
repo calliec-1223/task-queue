@@ -5,8 +5,8 @@ import sys
 import time
 from pathlib import Path
 
-from src.core.queue import Queue
-from src.worker import Worker
+from taskqueue.core.queue import Queue
+from taskqueue.worker import Worker
 
 from tests.conftest import TEST_REDIS_URL
 
@@ -66,7 +66,7 @@ def test_killed_worker_process_loses_no_job(r):
 
     env = {**os.environ, "REDIS_URL": TEST_REDIS_URL, "LEASE_SECONDS": "1"}
     proc = subprocess.Popen(
-        [sys.executable, "-m", "src.worker"], cwd=REPO_ROOT, env=env,
+        [sys.executable, "-m", "taskqueue.worker"], cwd=REPO_ROOT, env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:

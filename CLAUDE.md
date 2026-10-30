@@ -26,7 +26,7 @@ Required reliability features:
 
 Claude may write any code in this project, following these rules.
 
-### Core logic (`src/core/`): design first, then code
+### Core logic (`taskqueue/core/`): design first, then code
 
 Core logic includes enqueue, dequeue, leases, acks, retries, backoff, dead-letter handling, idempotency, Redis data structure choices, and the PostgreSQL schema.
 

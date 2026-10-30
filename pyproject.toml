@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskqueue"
+version = "0.1.0"
+description = "Distributed task queue in Python with Redis and PostgreSQL, built from scratch"
+requires-python = ">=3.11"
+dependencies = [
+    "redis>=5.2,<6",
+    "psycopg[binary]>=3.2,<4",
+]
+
+[tool.setuptools]
+packages = ["taskqueue", "taskqueue.core"]
+
+[tool.setuptools.package-data]
+# Non-Python files the package needs at runtime.
+taskqueue = ["dashboard.html", "core/schema.sql"]

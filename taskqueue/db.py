@@ -1,7 +1,7 @@
 """PostgreSQL connection and schema setup.
 
 Create the tables with:
-    python -m src.db init
+    python -m taskqueue.db init
 """
 
 import sys
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import psycopg
 
-from src import config
+from taskqueue import config
 
 SCHEMA_FILE = Path(__file__).resolve().parent / "core" / "schema.sql"
 
@@ -25,8 +25,9 @@ def init_schema(conn: psycopg.Connection) -> None:
 
 
 def main() -> None:
+    config.load_dotenv()
     if sys.argv[1:] != ["init"]:
-        sys.exit("usage: python -m src.db init")
+        sys.exit("usage: python -m taskqueue.db init")
     with connect() as conn:
         init_schema(conn)
     print("schema ready")

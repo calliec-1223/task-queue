@@ -1,4 +1,4 @@
-from src.core.queue import Queue
+from taskqueue.core.queue import Queue
 
 
 def make_dead_job(q, error):

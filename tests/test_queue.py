@@ -1,6 +1,6 @@
 import time
 
-from src.core.queue import Queue
+from taskqueue.core.queue import Queue
 
 
 def test_enqueue_then_lease_returns_job(r):

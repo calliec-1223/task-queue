@@ -30,8 +30,8 @@ from pathlib import Path
 
 import redis
 
-from src import config, db
-from src.core.queue import Queue
+from taskqueue import config, db
+from taskqueue.core.queue import Queue
 
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS = ROOT / "bench" / "results"
@@ -129,6 +129,7 @@ def latency_run(q: Queue, pg, workers: int, mode: str, rate: float,
 
 
 def main() -> None:
+    config.load_dotenv()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--quick", action="store_true", help="small, fast sanity run")
     parser.add_argument("--skip-throughput", action="store_true",
@@ -141,8 +142,8 @@ def main() -> None:
     else:
         worker_counts, tp_jobs, rate, duration = [1, 2, 4, 8, 16], 1000, 100, 20
 
-    r = redis.Redis.from_url(config.REDIS_URL)
-    q = Queue(r, name=config.QUEUE_NAME)
+    r = redis.Redis.from_url(config.redis_url())
+    q = Queue(r, name=config.queue_name())
     if r.zcard(q.pending_key) or r.zcard(q.inflight_key):
         raise SystemExit("queue isn't empty; wait for it to drain so old jobs don't skew results")
     pg = db.connect()

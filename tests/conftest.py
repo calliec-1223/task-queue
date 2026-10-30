@@ -3,6 +3,10 @@ import os
 import pytest
 import redis
 
+from taskqueue import config
+
+config.load_dotenv()  # tests use the local .env, like the command-line tools
+
 # Tests use Redis database 15 and wipe it, so they never touch real data in db 0.
 TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15")
 
@@ -28,7 +32,7 @@ def pg():
     import psycopg
     from psycopg import sql
 
-    from src import db
+    from taskqueue import db
 
     try:
         admin = db.connect()

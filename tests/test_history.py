@@ -1,8 +1,8 @@
 import pytest
 import redis
 
-from src.core.queue import Queue
-from src.history import HistoryWriter
+from taskqueue.core.queue import Queue
+from taskqueue.history import HistoryWriter
 
 
 def drain(writer):
@@ -150,7 +150,7 @@ def add_bad_event(r, q):
 
 def test_poison_event_is_dead_lettered_and_unblocks_history(r, pg):
     """Failure test: a bad event must not block the events behind it forever."""
-    from src.history import EventFailed
+    from taskqueue.history import EventFailed
     q = Queue(r)
     before = q.enqueue({"task": "a"})
     add_bad_event(r, q)
@@ -175,7 +175,7 @@ def test_poison_event_is_dead_lettered_and_unblocks_history(r, pg):
 
 def test_event_that_fails_once_is_retried_not_dead_lettered(r, pg, monkeypatch):
     """A one-off glitch gets another chance (why we picked retry-N-times)."""
-    from src.history import EventFailed
+    from taskqueue.history import EventFailed
     q = Queue(r)
     job_id = q.enqueue({})
     writer = HistoryWriter(r, pg)

@@ -1,7 +1,7 @@
 """History writer: copies job events from the Redis stream into PostgreSQL.
 
 Run it with:
-    python -m src.history
+    python -m taskqueue.history
 
 How it stays safe:
 - Events are read through a Redis "consumer group", which remembers which
@@ -27,7 +27,7 @@ import psycopg
 import redis
 from psycopg.types.json import Jsonb
 
-from src import config, db
+from taskqueue import config, db
 
 log = logging.getLogger("history")
 
@@ -209,11 +209,12 @@ class HistoryWriter:
 
 
 def main() -> None:
+    config.load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    client = redis.Redis.from_url(config.REDIS_URL)
+    client = redis.Redis.from_url(config.redis_url())
     conn = db.connect()
     db.init_schema(conn)
-    HistoryWriter(client, conn, queue_name=config.QUEUE_NAME).run()
+    HistoryWriter(client, conn, queue_name=config.queue_name()).run()
 
 
 if __name__ == "__main__":

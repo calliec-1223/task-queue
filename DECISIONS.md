@@ -115,3 +115,28 @@ Each entry records a choice, the alternatives considered, and why.
 - **Why**: Measured, it gets most of 50 ms polling's latency (p99 33–62 ms) at 500 ms polling's idle cost (146 vs 144 commands/sec). It's the same exponential backoff idea as job retries (#5).
 - **Revisited after benchmarking**: Fixed 50 ms had the best p99 by up to about 25 ms, and at 16 workers its idle cost (about 950 commands/sec) is under 1% of Redis's capacity. I kept adaptive anyway: the idle cost of fixed polling grows with every worker (about 60,000 commands/sec at 1,000 idle workers), and the real jobs in Phase 4 (Claude API calls) take seconds, so 25 ms is about 1% of a job.
 - **Tradeoffs accepted**: Slightly worse p99 than fixed 50 ms right after an idle stretch, because a backed-off worker can be mid-wait (up to 500 ms) when work arrives. Still no true push notification, which is the cost of choosing sorted sets in #2.
+
+## 14. Phase 4: Whisk uses task-queue as a library
+
+- **Decision**: Whisk installs `taskqueue` as a Python package, enqueues chat jobs from its web server, and runs its own worker process with a `whisk_chat` task defined in Whisk's code. Whisk uses its own queue (`whisk`) so the demo workers never pick up chat jobs.
+- **Alternatives**:
+  - *Put the chat task inside task-queue*: nothing new to run, but the queue would contain baking-app code, and its workers would need Whisk's API key and database.
+  - *Separate service with an HTTP API*: the most service-like, but the most work: a new API, auth between services, and the chat code still has to run somewhere.
+- **Why**: The queue stays generic infrastructure, and Whisk's secrets and data stay in Whisk. It's how real task libraries are used.
+- **Consequences**: The package was renamed from `src` to `taskqueue`, and importing it no longer loads task-queue's `.env` (only the command-line tools do), so it can't change the host app's settings.
+
+## 15. Phase 4: the browser polls for the chat answer
+
+- **Decision**: `POST /chat` returns `202 Accepted` with a job ID immediately; the browser checks `GET /chat/<id>` every second until the answer is ready.
+- **Alternatives**:
+  - *Long polling*: answer arrives instantly, but each waiting request holds a server process, which is the problem being fixed.
+  - *Server-Sent Events*: real push and a path to word-by-word streaming, but Whisk's server handles one request per process, so it would need an async server; and with results in PostgreSQL the server would still be polling underneath.
+- **Why**: Keeps the web server free; each check takes milliseconds. Up to 1 second of extra delay on a multi-second answer isn't noticeable.
+- **Tradeoffs accepted**: Extra small requests while waiting, and no word-by-word streaming.
+
+## 16. Phase 4: apps read results from PostgreSQL history
+
+- **Decision**: Whisk reads a finished job's result from the history database (`taskqueue.results.get_job`). "Not found yet" means still pending.
+- **Alternatives**: *Store results in Redis on the job*: instant and fast, but a core change plus an expiry rule to keep Redis from filling up, and results would be temporary.
+- **Why**: No core queue changes, and results are kept permanently.
+- **Tradeoffs accepted**: History lags Redis slightly (milliseconds when the writer is keeping up), so answers appear a little later. Whisk needs read access to the queue's database, which couples the two systems.

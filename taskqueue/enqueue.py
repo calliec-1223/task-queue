@@ -1,9 +1,9 @@
 """Submit a job from the command line.
 
 Examples:
-    python -m src.enqueue echo '{"msg": "hello"}'
-    python -m src.enqueue sleep '{"seconds": 5}' --delay 10
-    python -m src.enqueue fail --max-attempts 3
+    python -m taskqueue.enqueue echo '{"msg": "hello"}'
+    python -m taskqueue.enqueue sleep '{"seconds": 5}' --delay 10
+    python -m taskqueue.enqueue fail --max-attempts 3
 """
 
 import argparse
@@ -11,11 +11,12 @@ import json
 
 import redis
 
-from src import config
-from src.core.queue import Queue
+from taskqueue import config
+from taskqueue.core.queue import Queue
 
 
 def main() -> None:
+    config.load_dotenv()
     parser = argparse.ArgumentParser(description="Submit a job to the queue.")
     parser.add_argument("task", help="task name, e.g. echo, sleep, fail")
     parser.add_argument("args", nargs="?", default="{}", help="task arguments as JSON")
@@ -24,8 +25,8 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=1, help="submit this many copies")
     opts = parser.parse_args()
 
-    client = redis.Redis.from_url(config.REDIS_URL)
-    queue = Queue(client, name=config.QUEUE_NAME)
+    client = redis.Redis.from_url(config.redis_url())
+    queue = Queue(client, name=config.queue_name())
     payload = {"task": opts.task, "args": json.loads(opts.args)}
     for _ in range(opts.count):
         job_id = queue.enqueue(payload, delay_seconds=opts.delay, max_attempts=opts.max_attempts)

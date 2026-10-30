@@ -11,13 +11,14 @@ from pathlib import Path
 import redis
 
 from bench.benchmark import POLL_MODES, set_workers
-from src import config
+from taskqueue import config
 
 WORKERS, SECONDS = 16, 10
 
 
 def main() -> None:
-    r = redis.Redis.from_url(config.REDIS_URL)
+    config.load_dotenv()
+    r = redis.Redis.from_url(config.redis_url())
     results = []
     try:
         for mode in POLL_MODES:

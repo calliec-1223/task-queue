@@ -23,7 +23,7 @@ def insert_attempt(pg, job_id, attempt_number, token=None):
 
 
 def test_schema_init_is_safe_to_run_twice(pg):
-    from src import db
+    from taskqueue import db
     db.init_schema(pg)  # must not fail on existing tables
 
 

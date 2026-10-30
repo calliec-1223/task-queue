@@ -1,7 +1,7 @@
 """Metrics endpoint and live dashboard.
 
 Run it with:
-    python -m src.metrics
+    python -m taskqueue.metrics
 Then open http://localhost:8000 (dashboard) or http://localhost:8000/metrics (JSON).
 
 Uses Python's built-in HTTP server, so no web framework dependency is needed.
@@ -18,7 +18,7 @@ from pathlib import Path
 import psycopg
 import redis
 
-from src import config, db
+from taskqueue import config, db
 
 log = logging.getLogger("metrics")
 
@@ -109,11 +109,11 @@ class Handler(BaseHTTPRequestHandler):
                 if Handler.pg_conn is None or Handler.pg_conn.closed:
                     Handler.pg_conn = db.connect()
                     Handler.pg_conn.autocommit = True
-                return collect(self.redis_client, Handler.pg_conn, config.QUEUE_NAME)
+                return collect(self.redis_client, Handler.pg_conn, config.queue_name())
             except psycopg.OperationalError:
                 # PostgreSQL down: still show live queue numbers from Redis.
                 Handler.pg_conn = None
-                return collect(self.redis_client, None, config.QUEUE_NAME)
+                return collect(self.redis_client, None, config.queue_name())
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)
@@ -127,8 +127,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    config.load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    Handler.redis_client = redis.Redis.from_url(config.REDIS_URL)
+    Handler.redis_client = redis.Redis.from_url(config.redis_url())
     port = int(os.environ.get("METRICS_PORT", 8000))
     # 127.0.0.1 = only reachable from this computer, unless overridden (Docker sets 0.0.0.0).
     host = os.environ.get("METRICS_HOST", "127.0.0.1")

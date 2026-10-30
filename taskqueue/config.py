@@ -1,5 +1,9 @@
 """Settings from environment variables, with .env loaded for local development.
 
+Only the command-line tools call load_dotenv(). When taskqueue is used as a
+library inside another app, it never reads this project's .env, so it can't
+change the host app's settings.
+
 Secrets (like POSTGRES_PASSWORD) only ever come from the environment or .env,
 never from code. Values are never printed or logged.
 """
@@ -26,10 +30,13 @@ def load_dotenv(path: Path = ENV_FILE) -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-load_dotenv()
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
-QUEUE_NAME = os.environ.get("QUEUE_NAME", "default")
+def redis_url() -> str:
+    return os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
+
+def queue_name() -> str:
+    return os.environ.get("QUEUE_NAME", "default")
 
 
 def postgres_conninfo(dbname: str | None = None) -> str:

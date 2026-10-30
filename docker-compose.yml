@@ -51,7 +51,7 @@ services:
 
   migrate:
     <<: *app
-    command: ["python", "-m", "src.db", "init"]
+    command: ["python", "-m", "taskqueue.db", "init"]
     restart: "no"
     depends_on:
       postgres:
@@ -59,18 +59,25 @@ services:
 
   worker:
     <<: *app
-    command: ["python", "-m", "src.worker"]
+    command: ["python", "-m", "taskqueue.worker"]
     deploy:
       replicas: 3
     stop_grace_period: 30s
 
   history:
     <<: *app
-    command: ["python", "-m", "src.history"]
+    command: ["python", "-m", "taskqueue.history"]
+
+  history-whisk:
+    <<: *app
+    command: ["python", "-m", "taskqueue.history"]
+    environment:
+      <<: *app-env
+      QUEUE_NAME: whisk
 
   metrics:
     <<: *app
-    command: ["python", "-m", "src.metrics"]
+    command: ["python", "-m", "taskqueue.metrics"]
     environment:
       <<: *app-env
       METRICS_HOST: 0.0.0.0

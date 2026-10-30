@@ -16,7 +16,7 @@ workers with slightly wrong clocks can't break lease expiry.
 Each script that changes a job also appends a history event to the events
 stream in the same atomic step. So a change and its event either both happen
 or neither does: history can't silently miss a change. A separate history
-writer (src/history.py) copies events into PostgreSQL.
+writer (taskqueue/history.py) copies events into PostgreSQL.
 
 Failure rule (used by both fail() and reap_expired()):
     if attempts < max_attempts: retry after exponential backoff with jitter
