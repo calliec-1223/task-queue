@@ -1,5 +1,7 @@
 # task-queue
 
+[![tests](https://github.com/calliec-1223/task-queue/actions/workflows/tests.yml/badge.svg)](https://github.com/calliec-1223/task-queue/actions/workflows/tests.yml)
+
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
 > Status: all six reliability features are built (leases, retries with backoff, dead-letter queue, idempotency, delayed and priority jobs, benchmarks and failure tests), plus PostgreSQL history and a real integration with my recipe app.
@@ -172,6 +174,16 @@ Load test: Whisk on gunicorn with 2 server processes. Some users chat back to ba
 - **Retries for free.** A failed Claude call is retried with backoff, then dead-lettered, instead of the user getting an error.
 
 [Raw results](bench/results/). Reproduce from Whisk's `backend/`: `python -m bench.measure_claude` (real calls, costs a few cents) and `python -m bench.load_test`.
+
+## Known limitations
+
+These are deliberate tradeoffs or not-yet-built pieces, not bugs:
+
+- **Redis is a single point of failure.** There's no replica or failover. Redis saves every write to disk once per second, so a restart keeps the queue, but if the whole machine crashes, up to about 1 second of changes can be lost (jobs and their history events are lost together, so they never disagree).
+- **One history writer per queue.** Events for a job must be applied in order, so there's one writer. That caps how fast history can be written; if the writer falls behind, events wait in Redis memory.
+- **Workers poll.** Sorted sets have no "wait until a job arrives" command, so idle workers check periodically (adaptive backoff, 10–500 ms). That adds some pickup latency and idle Redis load.
+- **At-least-once, not exactly-once.** If a worker freezes long enough to lose its lease but is still alive, another worker can run the same job at the same time. Result checkpoints keep the recorded result consistent, but both runs do the work.
+- **Not yet built:** cleanup of finished jobs from Redis (they currently stay in memory), a maximum run time for hung tasks, and a way for a task to say "don't retry this error."
 
 ## Design decisions
 
