@@ -113,4 +113,5 @@ Each entry records a choice, the alternatives considered, and why.
   - *Fixed 50 ms*: p99 of 31–39 ms, but 952 Redis commands/sec from 16 idle workers, 6.6× more.
   - *Fixed 100 ms*: a middle ground that's still a fixed tradeoff.
 - **Why**: Measured, it gets most of 50 ms polling's latency (p99 33–62 ms) at 500 ms polling's idle cost (146 vs 144 commands/sec). It's the same exponential backoff idea as job retries (#5).
+- **Revisited after benchmarking**: Fixed 50 ms had the best p99 by up to about 25 ms, and at 16 workers its idle cost (about 950 commands/sec) is under 1% of Redis's capacity. I kept adaptive anyway: the idle cost of fixed polling grows with every worker (about 60,000 commands/sec at 1,000 idle workers), and the real jobs in Phase 4 (Claude API calls) take seconds, so 25 ms is about 1% of a job.
 - **Tradeoffs accepted**: Slightly worse p99 than fixed 50 ms right after an idle stretch, because a backed-off worker can be mid-wait (up to 500 ms) when work arrives. Still no true push notification, which is the cost of choosing sorted sets in #2.
