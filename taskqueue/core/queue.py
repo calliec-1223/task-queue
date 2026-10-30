@@ -44,6 +44,8 @@ from typing import Any, Callable
 
 import redis
 
+from taskqueue.errors import PayloadTooLarge, QueueFull
+
 JOB_PREFIX = "tq:job:"
 
 # Shared Lua helper: current Redis server time as float seconds.
@@ -122,7 +124,7 @@ end
 
 # KEYS: delayed, ready, config, events, idempotency_key ("" if none)
 # ARGV: job_key, job_id, payload_json, delay_seconds, max_attempts, queue_name,
-#       idempotency_ttl, priority, timeout_seconds
+#       idempotency_ttl, priority, timeout_seconds, max_waiting (0 = no limit)
 _ENQUEUE = _NOW + """
 local delayed_key, ready_key, config_key, events_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 """ + _EMIT + _SCHEDULE + """
@@ -131,7 +133,15 @@ local delayed_key, ready_key, config_key, events_key = KEYS[1], KEYS[2], KEYS[3]
 -- in one script, so two simultaneous submissions can't both get through.
 if KEYS[5] ~= '' then
     local existing = redis.call('GET', KEYS[5])
-    if existing then return existing end
+    if existing then return existing end  -- no new job, so allowed even when full
+end
+-- Backpressure: refuse new work when too many jobs are already waiting. The
+-- count and the insert are in one script, so concurrent producers can't overshoot.
+local max_waiting = tonumber(ARGV[10])
+if max_waiting > 0 and redis.call('ZCARD', ready_key) + redis.call('ZCARD', delayed_key) >= max_waiting then
+    return redis.error_reply('QUEUE_FULL')
+end
+if KEYS[5] ~= '' then
     redis.call('SET', KEYS[5], ARGV[2], 'EX', tonumber(ARGV[7]))
 end
 redis.call('HSET', ARGV[1], 'id', ARGV[2], 'payload', ARGV[3], 'status', 'pending',
@@ -378,6 +388,8 @@ class Queue:
         retry_cap_seconds: float = 300,
         jitter: Callable[[], float] = random.random,  # tests can pass a fixed value
         priority_step_seconds: float = 60,
+        max_waiting: int = 100_000,          # 0 = no limit
+        max_payload_bytes: int = 64 * 1024,
     ):
         self.r = client
         self.name = name
@@ -396,6 +408,8 @@ class Queue:
         # The aging step must be the same for every producer and worker, so it's
         # stored once in Redis. HSETNX: the first Queue to start sets it.
         client.hsetnx(self.config_key, "priority_step", priority_step_seconds)
+        self.max_waiting = max_waiting
+        self.max_payload_bytes = max_payload_bytes
         # register_script sends the script once, then calls it by its hash.
         self._enqueue = client.register_script(_ENQUEUE)
         self._lease = client.register_script(_LEASE)
@@ -426,18 +440,29 @@ class Queue:
         max_attempts counts every run, including the first.
         idempotency_key: submitting the same key again (within idempotency_ttl
         seconds) returns the original job's id instead of creating a duplicate.
+        Raises QueueFull if max_waiting jobs are already waiting, and
+        PayloadTooLarge if the payload is over max_payload_bytes.
         priority: higher runs sooner (any integer; default 0). Each level is
         worth priority_step_seconds of waiting, so lower priorities still run.
         timeout_seconds: longest one attempt may run. Heartbeats can't extend the
         lease past it, so a hung task times out and is retried or dead-lettered.
         """
+        body = json.dumps(payload)
+        if len(body.encode()) > self.max_payload_bytes:
+            raise PayloadTooLarge(
+                f"payload is {len(body.encode()):,} bytes; limit is {self.max_payload_bytes:,}")
         job_id = str(uuid.uuid4())
         idem = f"tq:{self.name}:idem:{idempotency_key}" if idempotency_key else ""
-        result = self._enqueue(
-            keys=[self.delayed_key, self.ready_key, self.config_key, self.events_key, idem],
-            args=[JOB_PREFIX + job_id, job_id, json.dumps(payload), delay_seconds,
-                  max_attempts, self.name, idempotency_ttl, int(priority), timeout_seconds],
-        )
+        try:
+            result = self._enqueue(
+                keys=[self.delayed_key, self.ready_key, self.config_key, self.events_key, idem],
+                args=[JOB_PREFIX + job_id, job_id, body, delay_seconds, max_attempts, self.name,
+                      idempotency_ttl, int(priority), timeout_seconds, self.max_waiting],
+            )
+        except redis.ResponseError as e:
+            if "QUEUE_FULL" in str(e):
+                raise QueueFull(f"queue {self.name!r} has {self.max_waiting:,} jobs waiting") from None
+            raise
         return result.decode()  # the new job, or the original one for a repeated key
 
     def get_checkpoint(self, job_id: str) -> tuple[bool, Any]:
