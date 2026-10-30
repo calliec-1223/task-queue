@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # A throwaway Redis and PostgreSQL for the tests. The database password is
+      # generated fresh on every run and masked in the logs, so no password is
+      # ever written in this file or stored as a secret.
+      - name: Start Redis and PostgreSQL
+        run: |
+          PW=$(openssl rand -hex 16)
+          echo "::add-mask::$PW"
+          echo "POSTGRES_PASSWORD=$PW" >> "$GITHUB_ENV"
+          docker run -d --name redis -p 6379:6379 redis:7.4
+          docker run -d --name postgres -p 5432:5432 \
+            -e POSTGRES_USER=taskqueue -e POSTGRES_PASSWORD="$PW" -e POSTGRES_DB=taskqueue \
+            postgres:17
+          for i in $(seq 1 30); do
+            docker exec postgres pg_isready -U taskqueue -d taskqueue && break
+            sleep 1
+          done
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q
