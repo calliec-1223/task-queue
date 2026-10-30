@@ -1,0 +1,26 @@
+{
+  "jobs_per_run": 20000,
+  "runs": [
+    {
+      "batch_size": 100,
+      "events": 60000,
+      "seconds": 63.1490197910025,
+      "events_per_second": 950.1335127382108,
+      "jobs_per_second": 316.7111709127369
+    },
+    {
+      "batch_size": 500,
+      "events": 60000,
+      "seconds": 66.7974902910064,
+      "events_per_second": 898.2373400348904,
+      "jobs_per_second": 299.41244667829676
+    },
+    {
+      "batch_size": 1000,
+      "events": 60000,
+      "seconds": 68.36667841699091,
+      "events_per_second": 877.6205220040123,
+      "jobs_per_second": 292.54017400133745
+    }
+  ]
+}
