@@ -2,7 +2,7 @@
 
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
-> Status: Phase 1 (core queue) in progress.
+> Status: Phase 2 complete (core queue, PostgreSQL history, Docker Compose, live dashboard). Next: load testing and failure-injection benchmarks.
 
 ## Architecture
 
@@ -38,20 +38,30 @@ Planned: idempotency, priority.
 
 ## Getting started
 
+Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+
 ```bash
-git clone <repo-url> && cd task-queue
+git clone https://github.com/calliec-1223/task-queue.git && cd task-queue
 cp .env.example .env              # then set POSTGRES_PASSWORD to any strong value
-docker compose up -d --wait       # starts Redis and PostgreSQL
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python -m src.db init            # creates the PostgreSQL tables
+docker compose up -d --build      # Redis, PostgreSQL, 3 workers, history writer, dashboard
 ```
 
-`docker compose down` stops everything. Data is kept in Docker volumes, so jobs survive restarts.
+Open the dashboard at http://localhost:8000.
+
+- `docker compose up -d --scale worker=10` runs 10 workers instead of 3.
+- `docker compose logs -f worker` follows the worker logs.
+- `docker compose down` stops everything. Data is kept in Docker volumes, so jobs and history survive restarts.
+
+To submit jobs or run tests from your own machine, also set up Python:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
 
 ## Usage
 
-Start a worker (run several in separate terminals to scale out) and the history writer:
+With Docker Compose running, workers and the history writer are already up. To run them directly on your machine instead (e.g. while developing):
 
 ```bash
 python -m src.worker
@@ -66,11 +76,9 @@ python -m src.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
 python -m src.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
 ```
 
-Watch it live: start the dashboard and open http://localhost:8000. It shows where jobs are right now (ready, waiting, running, done, dead), jobs completed and attempts failed per second over the last minute, and recent jobs with their status and errors. Raw numbers are at http://localhost:8000/metrics as JSON.
+Watch it live at http://localhost:8000. It shows where jobs are right now (ready, waiting, running, done, dead), jobs completed and attempts failed per second over the last minute, and recent jobs with their status and errors. Raw numbers are at http://localhost:8000/metrics as JSON.
 
-```bash
-python -m src.metrics
-```
+Started by Docker Compose, or directly with `python -m src.metrics`.
 
 Inspect and replay the dead-letter queue:
 
@@ -94,4 +102,4 @@ See [DECISIONS.md](DECISIONS.md).
 pytest
 ```
 
-Tests need Redis running. They use Redis database 15 and wipe it, so they never touch real data. The failure tests include a real worker process killed with `SIGKILL` mid-job, a poison job that crashes every worker, and stale workers trying to ack, fail or heartbeat after losing their lease.
+Tests need Redis and PostgreSQL running (`docker compose up -d redis postgres`). They use Redis database 15 and wipe it, so they never touch real data. The failure tests include a real worker process killed with `SIGKILL` mid-job, a poison job that crashes every worker, and stale workers trying to ack, fail or heartbeat after losing their lease.

@@ -1,3 +1,22 @@
+x-app-env: &app-env
+  REDIS_URL: redis://redis:6379/0
+  POSTGRES_HOST: postgres
+  POSTGRES_USER: ${POSTGRES_USER:-taskqueue}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+  POSTGRES_DB: ${POSTGRES_DB:-taskqueue}
+  LEASE_SECONDS: ${LEASE_SECONDS:-30}
+
+x-app: &app
+  build: .
+  image: task-queue:latest
+  environment: *app-env
+  restart: unless-stopped
+  depends_on:
+    redis:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+
 services:
   redis:
     image: redis:7.4
@@ -27,6 +46,34 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  migrate:
+    <<: *app
+    command: ["python", "-m", "src.db", "init"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "src.worker"]
+    deploy:
+      replicas: 3
+    stop_grace_period: 30s
+
+  history:
+    <<: *app
+    command: ["python", "-m", "src.history"]
+
+  metrics:
+    <<: *app
+    command: ["python", "-m", "src.metrics"]
+    environment:
+      <<: *app-env
+      METRICS_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:8000:8000"
 
 volumes:
   redis-data:

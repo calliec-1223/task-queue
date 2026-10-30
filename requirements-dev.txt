@@ -1,0 +1,2 @@
+-r requirements.txt      # everything the app needs, plus:
+pytest==8.3.4            # test runner (not needed inside the Docker image)

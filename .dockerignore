@@ -1,0 +1,10 @@
+# Never copy secrets into an image: anyone with the image could read them.
+.env
+.env.*
+# Not needed to run the app, and would make the image bigger.
+.venv/
+.git/
+tests/
+__pycache__/
+*.pyc
+.pytest_cache/
