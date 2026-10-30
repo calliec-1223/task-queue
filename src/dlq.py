@@ -7,10 +7,10 @@ Examples:
 """
 
 import argparse
-import os
 
 import redis
 
+from src import config
 from src.core.queue import Queue
 
 
@@ -26,8 +26,8 @@ def main() -> None:
     many.add_argument("--limit", type=int, default=None)
     opts = parser.parse_args()
 
-    client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
-    queue = Queue(client, name=os.environ.get("QUEUE_NAME", "default"))
+    client = redis.Redis.from_url(config.REDIS_URL)
+    queue = Queue(client, name=config.QUEUE_NAME)
 
     if opts.command == "list":
         for job in queue.list_dead(opts.count):

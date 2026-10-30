@@ -1,0 +1,34 @@
+-- Job history. Redis is the live queue; PostgreSQL is the permanent record.
+-- Safe to run more than once (IF NOT EXISTS).
+
+-- One row per job: its current state.
+CREATE TABLE IF NOT EXISTS jobs (
+    id            UUID PRIMARY KEY,                 -- same id as in Redis
+    queue         TEXT NOT NULL,
+    payload       JSONB NOT NULL,                   -- JSONB = JSON stored in a queryable binary form
+    status        TEXT NOT NULL
+                  CHECK (status IN ('pending', 'leased', 'done', 'dead')),
+    max_attempts  INT NOT NULL,
+    result        JSONB,                            -- return value of the task, if done
+    last_error    TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at   TIMESTAMPTZ                       -- when it became done or dead
+);
+
+-- Find jobs by status quickly ("show me all dead jobs") without scanning every row.
+CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);
+
+-- One row per attempt, never overwritten. Survives replays, unlike Redis's attempts counter.
+CREATE TABLE IF NOT EXISTS job_attempts (
+    lease_token     UUID PRIMARY KEY,               -- each lease is unique, so it identifies the attempt
+    job_id          UUID NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+    attempt_number  INT NOT NULL,                   -- Redis's counter at the time (restarts at 1 after a replay)
+    started_at      TIMESTAMPTZ NOT NULL,
+    finished_at     TIMESTAMPTZ,                    -- NULL while running
+    outcome         TEXT CHECK (outcome IN ('done', 'error', 'lease_expired')),
+    error           TEXT
+);
+
+-- Get a job's attempts in order without scanning the whole table.
+CREATE INDEX IF NOT EXISTS job_attempts_job_idx ON job_attempts (job_id, started_at);

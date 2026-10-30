@@ -17,3 +17,34 @@ def r():
     client.flushdb()
     yield client
     client.flushdb()
+
+
+TEST_PG_DB = "taskqueue_test"
+
+
+@pytest.fixture
+def pg():
+    """A connection to a separate test database, with fresh empty tables."""
+    import psycopg
+    from psycopg import sql
+
+    from src import db
+
+    try:
+        admin = db.connect()
+    except (psycopg.OperationalError, RuntimeError):
+        pytest.skip("PostgreSQL not running (start it with: docker compose up -d)")
+    with admin:
+        admin.autocommit = True  # CREATE DATABASE can't run inside a transaction
+        exists = admin.execute(
+            "SELECT 1 FROM pg_database WHERE datname = %s", (TEST_PG_DB,)
+        ).fetchone()
+        if not exists:
+            admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_PG_DB)))
+
+    conn = db.connect(TEST_PG_DB)
+    conn.execute("DROP TABLE IF EXISTS job_attempts, jobs")
+    db.init_schema(conn)
+    conn.commit()
+    yield conn
+    conn.close()

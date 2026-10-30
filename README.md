@@ -17,7 +17,7 @@ flowchart LR
 - **Producers** submit jobs.
 - **Redis** holds pending jobs.
 - **Workers** lease jobs, run them, and report results.
-- **PostgreSQL** stores job history (planned, Phase 2).
+- **PostgreSQL** stores job history: a `jobs` table with each job's current state, and a `job_attempts` table with one permanent row per attempt (in progress).
 
 ## Features
 
@@ -41,6 +41,7 @@ cp .env.example .env              # then set POSTGRES_PASSWORD to any strong val
 docker compose up -d --wait       # starts Redis and PostgreSQL
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+python -m src.db init            # creates the PostgreSQL tables
 ```
 
 `docker compose down` stops everything. Data is kept in Docker volumes, so jobs survive restarts.

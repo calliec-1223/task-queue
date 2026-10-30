@@ -8,10 +8,10 @@ Examples:
 
 import argparse
 import json
-import os
 
 import redis
 
+from src import config
 from src.core.queue import Queue
 
 
@@ -24,8 +24,8 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=1, help="submit this many copies")
     opts = parser.parse_args()
 
-    client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
-    queue = Queue(client, name=os.environ.get("QUEUE_NAME", "default"))
+    client = redis.Redis.from_url(config.REDIS_URL)
+    queue = Queue(client, name=config.QUEUE_NAME)
     payload = {"task": opts.task, "args": json.loads(opts.args)}
     for _ in range(opts.count):
         job_id = queue.enqueue(payload, delay_seconds=opts.delay, max_attempts=opts.max_attempts)

@@ -70,3 +70,13 @@ Each entry records a choice, the alternatives considered, and why.
   - *AOF synced on every write*: loses nothing, but much slower.
 - **Why**: A queue that loses jobs on restart breaks the "zero job loss" goal. Syncing every second keeps writes fast.
 - **Tradeoffs accepted**: If the machine itself crashes, up to about 1 second of writes can be lost.
+
+## 10. PostgreSQL schema: `jobs` (current state) + `job_attempts` (one row per attempt)
+
+- **Decision**: `jobs` has one row per job, updated as it changes. `job_attempts` has one row per attempt that is never overwritten, keyed by the attempt's lease token.
+- **Alternatives**:
+  - *One `jobs` table only*: simplest, but each update overwrites the last, so the attempt history is lost. That would break decision #8 (replay resets `attempts` because PostgreSQL keeps the history).
+  - *Append-only `job_events` log*: a complete audit trail, but the table grows fastest, and a job's current status has to be worked out from its latest event instead of read from a column.
+- **Why**: Current status is a simple lookup, and every attempt is kept, even across replays.
+- **Detail**: The lease token is the attempt's primary key. After a replay, Redis restarts attempt numbers at 1, so "job X, attempt 1" can happen twice; tokens never repeat. It also means the same attempt can't be recorded twice.
+- **Tradeoffs accepted**: Two writes per attempt, and a join to see a job together with its history.

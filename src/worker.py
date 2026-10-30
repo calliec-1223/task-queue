@@ -17,6 +17,7 @@ import time
 
 import redis
 
+from src import config
 from src.core.queue import Queue
 from src.tasks import TASKS
 
@@ -126,8 +127,8 @@ class Worker:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
-    queue = Queue(client, name=os.environ.get("QUEUE_NAME", "default"))
+    client = redis.Redis.from_url(config.REDIS_URL)
+    queue = Queue(client, name=config.QUEUE_NAME)
     Worker(queue, lease_seconds=float(os.environ.get("LEASE_SECONDS", 30))).run()
 
 
