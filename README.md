@@ -2,7 +2,7 @@
 
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
-> Status: Phase 3 complete: benchmarks and failure-injection results below. Next: integrating with Whisk.
+> Status: all four phases complete: core queue, PostgreSQL history, benchmarks and failure injection, and a real integration with my recipe app.
 
 ## Architecture
 
@@ -150,6 +150,26 @@ Faster polling costs Redis work while workers are idle. Measured with 16 idle wo
 Interrupted jobs were recovered by lease expiry and finished on a later attempt. Some kills hit idle workers, which is why there are fewer interrupted jobs than kills. Every job also appears exactly once in PostgreSQL history, despite the history writer being killed 5 times.
 
 Reproduce: `docker compose up -d --build`, then `python -m bench.benchmark`, `python -m bench.chaos`, and `python -m bench.plot`.
+
+## Real-world use: Whisk's AI baking assistant
+
+[Whisk](https://github.com/calliec-1223/whisk) is my recipe app. Its chat assistant called the Claude API inside the web request, so a server process sat idle for the whole answer (2-3 seconds) and couldn't serve anyone else. Whisk now uses this queue as a library: `POST /chat` enqueues the question and returns `202 Accepted` with a job ID in milliseconds; a Whisk worker asks Claude; the browser checks `GET /chat/<id>` once a second. Only the user who asked can read the answer. ([DECISIONS.md](DECISIONS.md) #14-16)
+
+![Whisk before and after](docs/whisk-before-after.png)
+
+Load test: Whisk on gunicorn with 2 server processes. Some users chat back to back while another loads their recipe list 5 times a second. Claude is replaced by a stand-in that replays 20 measured real response times (median 2.416 s), so the test is free and repeatable. Medians:
+
+| People chatting | Page load, before | Page load, after | `POST /chat`, before | `POST /chat`, after | Answer, before | Answer, after |
+|---|---|---|---|---|---|---|
+| 1 | 7 ms | 6 ms | 2,437 ms | 5 ms | 2.4 s | 3.1 s |
+| 4 | 3,375 ms | 7 ms | 4,935 ms | 17 ms | 4.9 s | 3.1 s |
+| 8 | 9,255 ms | 8 ms | 9,959 ms | 21 ms | 10.0 s | 5.2 s |
+
+- **Page loads stay fast.** Before, every chat held one of the 2 server processes for the whole Claude call, so recipe pages waited behind chats. After, the server only enqueues and reads results.
+- **Answers are faster under load, slower when idle.** With 1 user, the queue adds about 0.7 s (the browser checks once a second, plus the history writer's lag). With 4-8 users, answers arrive sooner, partly because queue mode runs 4 workers in addition to the 2 server processes, so it isn't an equal-resources comparison for answer time. The page-load result doesn't depend on that: it comes from the web server no longer waiting on Claude.
+- **Retries for free.** A failed Claude call is retried with backoff, then dead-lettered, instead of the user getting an error.
+
+[Raw results](bench/results/). Reproduce from Whisk's `backend/`: `python -m bench.measure_claude` (real calls, costs a few cents) and `python -m bench.load_test`.
 
 ## Design decisions
 
