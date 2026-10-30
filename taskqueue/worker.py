@@ -36,6 +36,7 @@ class Worker:
         min_poll_interval: float = 0.01,
         reap_interval: float = 1.0,
         cleanup_interval: float = 60.0,
+        on_job_abandoned=None,
     ):
         self.queue = queue
         self.tasks = tasks
@@ -51,6 +52,11 @@ class Worker:
         self.min_poll_interval = min(min_poll_interval, poll_interval)
         self.reap_interval = reap_interval
         self.cleanup_interval = cleanup_interval
+        # Called when a running job hits its time limit or loses its lease. A
+        # Python thread can't be killed, so by default the whole worker process
+        # exits and its supervisor (Docker's restart policy) starts a fresh one.
+        # Tests pass a function instead, so pytest isn't killed.
+        self.on_job_abandoned = on_job_abandoned or _exit_process
         self._last_cleanup = 0.0
         self._last_reap = 0.0
         self._stopping = False
@@ -88,8 +94,10 @@ class Worker:
 
         # Heartbeat in a background thread while the task runs.
         stop_heartbeat = threading.Event()
+        # The job's time limit, measured from now (the lease just started).
+        deadline = time.monotonic() + float(job.get("timeout", 300))
         heartbeat = threading.Thread(
-            target=self._heartbeat, args=(job_id, token, stop_heartbeat), daemon=True
+            target=self._heartbeat, args=(job_id, token, stop_heartbeat, deadline), daemon=True
         )
         heartbeat.start()
 
@@ -127,12 +135,17 @@ class Worker:
             raise ValueError(f"unknown task: {name!r}")
         return self.tasks[name](**payload.get("args", {}))
 
-    def _heartbeat(self, job_id: str, token: str, stop: threading.Event) -> None:
-        # stop.wait() returns True as soon as stop is set, so this exits promptly.
-        while not stop.wait(self.heartbeat_interval):
+    def _heartbeat(self, job_id: str, token: str, stop: threading.Event, deadline: float) -> None:
+        # Wake at the next regular heartbeat, or right at the time limit if that
+        # comes first, so a hung job is abandoned on time. stop.wait() returns
+        # True as soon as stop is set, so this exits promptly when the job ends.
+        while not stop.wait(max(0.0, min(self.heartbeat_interval, deadline - time.monotonic()) + 0.01)):
             try:
-                if not self.queue.extend_lease(job_id, token, self.lease_seconds):
-                    log.warning("job %s: heartbeat rejected, lease lost", job_id)
+                status = self.queue.heartbeat(job_id, token, self.lease_seconds)
+                if status != "ok":
+                    reason = "hit its time limit" if status == "timed_out" else "lost its lease"
+                    log.error("job %s %s; abandoning it", job_id, reason)
+                    self.on_job_abandoned(job_id, status)
                     return
             except redis.RedisError as e:
                 # Keep trying: the lease survives a few missed heartbeats.
@@ -157,6 +170,12 @@ class Worker:
     def _request_stop(self, signum, frame) -> None:
         log.info("stop requested, finishing current job")
         self._stopping = True
+
+
+def _exit_process(job_id: str, status: str) -> None:
+    logging.shutdown()
+    # os._exit: stop immediately, even though the main thread is stuck in the task.
+    os._exit(3)
 
 
 def main() -> None:

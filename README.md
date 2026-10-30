@@ -37,6 +37,7 @@ flowchart LR
 - **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
 - **Idempotency keys**: submitting a job with the same key twice returns the original job instead of a duplicate. The check and the create are one atomic script, so even simultaneous submissions create one job.
 - **Result checkpoints**: a finished task's result is saved before the ack. If the job is redelivered (the worker crashed or lost its lease before acking), the next worker reuses the result instead of redoing the work.
+- **Time limits**: each job has a maximum run time (default 5 minutes). Heartbeats can't extend a lease past it, so a hung task times out and is retried or dead-lettered like any failure. The stuck worker exits and Docker restarts it, since a Python thread can't be killed.
 - **Cleanup**: Redis only keeps what's live. Finished jobs are removed from Redis after 24 hours and dead-lettered jobs after 30 days, in small batches; PostgreSQL keeps the permanent history.
 - **Priority with aging**: higher-priority jobs run first, but each priority level is worth 60 seconds of waiting, so a lower-priority job that has waited long enough catches up and nothing starves. Delayed and retrying jobs wait in a separate set, so priority never lets a job run before its time.
 
@@ -184,7 +185,7 @@ These are deliberate tradeoffs or not-yet-built pieces, not bugs:
 - **One history writer per queue.** Events for a job must be applied in order, so there's one writer. That caps how fast history can be written; if the writer falls behind, events wait in Redis memory.
 - **Workers poll.** Sorted sets have no "wait until a job arrives" command, so idle workers check periodically (adaptive backoff, 10–500 ms). That adds some pickup latency and idle Redis load.
 - **At-least-once, not exactly-once.** If a worker freezes long enough to lose its lease but is still alive, another worker can run the same job at the same time. Result checkpoints keep the recorded result consistent, but both runs do the work.
-- **Not yet built:** a maximum run time for hung tasks, and a way for a task to say "don't retry this error."
+- **Not yet built:** a way for a task to say "don't retry this error."
 
 ## Design decisions
 

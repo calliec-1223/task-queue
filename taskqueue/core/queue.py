@@ -119,7 +119,7 @@ end
 
 # KEYS: delayed, ready, config, events, idempotency_key ("" if none)
 # ARGV: job_key, job_id, payload_json, delay_seconds, max_attempts, queue_name,
-#       idempotency_ttl, priority
+#       idempotency_ttl, priority, timeout_seconds
 _ENQUEUE = _NOW + """
 local delayed_key, ready_key, config_key, events_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 """ + _EMIT + _SCHEDULE + """
@@ -132,7 +132,8 @@ if KEYS[5] ~= '' then
     redis.call('SET', KEYS[5], ARGV[2], 'EX', tonumber(ARGV[7]))
 end
 redis.call('HSET', ARGV[1], 'id', ARGV[2], 'payload', ARGV[3], 'status', 'pending',
-           'attempts', 0, 'max_attempts', ARGV[5], 'priority', ARGV[8], 'created_at', now)
+           'attempts', 0, 'max_attempts', ARGV[5], 'priority', ARGV[8],
+           'timeout', ARGV[9], 'created_at', now)
 schedule(ARGV[1], ARGV[2], now + tonumber(ARGV[4]))
 emit('enqueued', ARGV[2], {'queue', ARGV[6], 'payload', ARGV[3], 'max_attempts', ARGV[5],
                            'priority', ARGV[8]})
@@ -182,11 +183,13 @@ local popped = redis.call('ZPOPMIN', ready_key)
 if #popped == 0 then return false end
 local id = popped[1]
 local job_key = ARGV[1] .. id
--- Move ready -> inflight. Score is the lease expiry time.
-redis.call('ZADD', KEYS[4], now + tonumber(ARGV[2]), id)
+-- Move ready -> inflight. Score is the lease expiry time, but never past the
+-- job's time limit (start + timeout), so a hung task can't run forever.
+local timeout = tonumber(redis.call('HGET', job_key, 'timeout') or '300')
+redis.call('ZADD', KEYS[4], now + math.min(tonumber(ARGV[2]), timeout), id)
 local attempt = redis.call('HINCRBY', job_key, 'attempts', 1)
 -- The token proves which lease is current (see ack).
-redis.call('HSET', job_key, 'status', 'leased', 'lease_token', ARGV[3])
+redis.call('HSET', job_key, 'status', 'leased', 'lease_token', ARGV[3], 'started_at', now)
 emit('leased', id, {'lease_token', ARGV[3], 'attempt', tostring(attempt)})
 return id
 """
@@ -208,11 +211,18 @@ return 1
 # KEYS: inflight  ARGV: job_key, job_id, lease_token, lease_seconds
 # (Heartbeats don't change history, so no event.)
 _EXTEND = _NOW + """
--- Heartbeat: only the current lease holder may extend.
-if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return 0 end
--- Reset expiry to now + lease_seconds (not "add to old expiry"), so it can't run away.
+-- Heartbeat: only the current lease holder may extend. Returns 1 = extended,
+-- 0 = lease lost (another worker owns the job), -1 = job hit its time limit.
+local fields = redis.call('HMGET', ARGV[1], 'lease_token', 'started_at', 'timeout')
+if fields[1] ~= ARGV[3] then return 0 end
+-- Reset expiry to now + lease_seconds (not "add to old expiry"), so it can't run
+-- away, and never past the time limit: a hung task's heartbeats can't keep it alive.
+-- (A job leased before time limits existed has no started_at: no limit.)
+local limit = math.huge
+if fields[2] then limit = tonumber(fields[2]) + tonumber(fields[3] or '300') end
+if now >= limit then return -1 end
 -- XX = only update if the job is already in inflight; never re-add it.
-redis.call('ZADD', KEYS[1], 'XX', now + tonumber(ARGV[4]), ARGV[2])
+redis.call('ZADD', KEYS[1], 'XX', math.min(now + tonumber(ARGV[4]), limit), ARGV[2])
 return 1
 """
 
@@ -243,8 +253,14 @@ local ids = redis.call('ZRANGEBYSCORE', inflight_key, '-inf', now, 'LIMIT', 0, t
 for i, id in ipairs(ids) do
     local job_key = ARGV[1] .. id
     redis.call('ZREM', inflight_key, id)
-    redis.call('HSET', job_key, 'last_error', 'lease expired')
-    retry_or_dead(job_key, id, tonumber(ARGV[4 + i]), 'lease_expired', 'lease expired')
+    -- Hit the time limit, or just stopped heartbeating (crashed)?
+    local f = redis.call('HMGET', job_key, 'started_at', 'timeout')
+    local err = 'lease expired'
+    if f[1] and now >= tonumber(f[1]) + tonumber(f[2] or '300') then
+        err = 'timed out after ' .. (f[2] or '300') .. ' s'
+    end
+    redis.call('HSET', job_key, 'last_error', err)
+    retry_or_dead(job_key, id, tonumber(ARGV[4 + i]), 'lease_expired', err)
 end
 return #ids
 """
@@ -338,6 +354,7 @@ class Queue:
         idempotency_key: str | None = None,
         idempotency_ttl: int = 86400,
         priority: int = 0,
+        timeout_seconds: float = 300,
     ) -> str:
         """Add a job. It can't be leased until delay_seconds have passed.
 
@@ -346,13 +363,15 @@ class Queue:
         seconds) returns the original job's id instead of creating a duplicate.
         priority: higher runs sooner (any integer; default 0). Each level is
         worth priority_step_seconds of waiting, so lower priorities still run.
+        timeout_seconds: longest one attempt may run. Heartbeats can't extend the
+        lease past it, so a hung task times out and is retried or dead-lettered.
         """
         job_id = str(uuid.uuid4())
         idem = f"tq:{self.name}:idem:{idempotency_key}" if idempotency_key else ""
         result = self._enqueue(
             keys=[self.delayed_key, self.ready_key, self.config_key, self.events_key, idem],
             args=[JOB_PREFIX + job_id, job_id, json.dumps(payload), delay_seconds,
-                  max_attempts, self.name, idempotency_ttl, int(priority)],
+                  max_attempts, self.name, idempotency_ttl, int(priority), timeout_seconds],
         )
         return result.decode()  # the new job, or the original one for a repeated key
 
@@ -395,15 +414,21 @@ class Queue:
         return ok == 1
 
     def extend_lease(self, job_id: str, lease_token: str, lease_seconds: float = 30) -> bool:
-        """Heartbeat: push the lease expiry to now + lease_seconds.
+        """Heartbeat: push the lease expiry to now + lease_seconds (never past the
+        job's time limit).
 
-        Returns False if this lease is no longer valid (the worker should stop the job).
+        Returns False if the lease is lost or the job hit its time limit; the
+        worker should stop the job. heartbeat() says which.
         """
-        ok = self._extend(
+        return self.heartbeat(job_id, lease_token, lease_seconds) == "ok"
+
+    def heartbeat(self, job_id: str, lease_token: str, lease_seconds: float = 30) -> str:
+        """Like extend_lease, but returns "ok", "lost" or "timed_out"."""
+        result = self._extend(
             keys=[self.inflight_key],
             args=[JOB_PREFIX + job_id, job_id, lease_token, lease_seconds],
         )
-        return ok == 1
+        return {1: "ok", 0: "lost", -1: "timed_out"}[result]
 
     def fail(self, job_id: str, lease_token: str, error: str) -> str | None:
         """Report that the job raised an error.

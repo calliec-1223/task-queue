@@ -24,6 +24,8 @@ def main() -> None:
     parser.add_argument("--delay", type=float, default=0, help="seconds before the job is ready")
     parser.add_argument("--max-attempts", type=int, default=5)
     parser.add_argument("--priority", type=int, default=0, help="higher runs sooner (default 0)")
+    parser.add_argument("--timeout", type=float, default=300,
+                        help="longest one attempt may run, in seconds (default 300)")
     parser.add_argument("--count", type=int, default=1, help="submit this many copies")
     opts = parser.parse_args()
 
@@ -32,7 +34,7 @@ def main() -> None:
     payload = {"task": opts.task, "args": json.loads(opts.args)}
     for _ in range(opts.count):
         job_id = queue.enqueue(payload, delay_seconds=opts.delay, max_attempts=opts.max_attempts,
-                               priority=opts.priority)
+                               priority=opts.priority, timeout_seconds=opts.timeout)
         print(job_id)
 
 

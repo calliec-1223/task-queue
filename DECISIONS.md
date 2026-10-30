@@ -169,3 +169,12 @@ Each entry records a choice, the alternatives considered, and why.
   - *Delete on ack*: least memory, but a finished job would briefly exist in neither Redis nor history (history lags slightly), so tools couldn't find it. (Its history isn't lost; events wait in the stream.)
 - **Why**: The only option that also bounds an ignored dead-letter queue, and you can see how many finished jobs are waiting to be cleaned.
 - **Tradeoffs accepted**: Another sorted set and Lua script; the sweep is batched like replay so it never blocks Redis. A dead job older than 30 days can no longer be replayed. The 24-hour and 30-day defaults are mine, adjustable per call.
+
+## 20. Time limits for hung tasks: enforced in Redis, stuck worker restarts itself
+
+- **Decision**: Each job has `timeout_seconds` (default 300, my choice). `lease()` records the start time, and neither the lease nor any heartbeat can push the lease expiry past *start + timeout*. The reaper then treats it as a failed attempt labelled "timed out after N s". The worker's heartbeat thread wakes right at the limit, sees the refusal, and exits the process; Docker's restart policy starts a fresh worker.
+- **Alternatives**:
+  - *Run each task in a child process the worker can kill*: truly stops the hung work and isolates crashes, but starting a process per job adds overhead that would cut throughput on short jobs, and arguments and results must be passable between processes.
+  - *Give tasks a deadline and trust them*: no machinery, but only protects tasks written correctly, not the unexpected hang this is meant to catch.
+- **Why**: It reuses the lease and reaper machinery and is enforced centrally, so buggy task code can't dodge it.
+- **Tradeoffs accepted**: Python can't kill a thread, so the stuck task stops only because its whole worker process exits, which needs a supervisor (Docker here). A worker that loses its lease for any reason now also exits, to stop doing duplicate work. Jobs leased before this change have no limit.
