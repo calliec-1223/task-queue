@@ -30,15 +30,17 @@ def collect(r: redis.Redis, conn: psycopg.Connection | None, queue: str = "defau
     """Gather every number the dashboard shows."""
     sec, usec = r.time()  # Redis server clock, same one the queue uses
     now = sec + usec / 1_000_000
-    pending_key = f"tq:{queue}:pending"
-    pending_total = r.zcard(pending_key)
-    ready = r.zcount(pending_key, "-inf", now)  # score <= now: can run right now
+    delayed_key = f"tq:{queue}:delayed"
+    # Ready = in the ready set, plus delayed jobs whose time has come but that
+    # haven't been moved over yet (that happens on the next lease).
+    due = r.zcount(delayed_key, "-inf", now)
+    ready = r.zcard(f"tq:{queue}:ready") + due
 
     metrics = {
         "now": now,
         "queue": {
             "ready": ready,
-            "delayed": pending_total - ready,  # waiting for a delay or retry backoff
+            "delayed": r.zcard(delayed_key) - due,  # waiting for a delay or retry backoff
             "inflight": r.zcard(f"tq:{queue}:inflight"),
             "dead": r.zcard(f"tq:{queue}:dead"),
             "history_backlog": r.xlen(f"tq:{queue}:events"),  # events not yet in PostgreSQL

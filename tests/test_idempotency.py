@@ -13,7 +13,7 @@ def test_same_key_returns_same_job(r):
     second = q.enqueue({"task": "echo"}, idempotency_key="user7:msg-1")
 
     assert first == second
-    assert r.zcard(q.pending_key) == 1
+    assert q.count_waiting() == 1
     assert r.xlen(q.events_key) == 1  # only one "enqueued" history event
 
 
@@ -61,7 +61,7 @@ def test_simultaneous_duplicate_submissions_create_one_job(r):
     for t in threads:
         t.join()
     assert len(set(ids)) == 1
-    assert r.zcard(q.pending_key) == 1
+    assert q.count_waiting() == 1
 
 
 # ---- Checkpoints: duplicate execution -----------------------------------------

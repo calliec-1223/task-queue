@@ -29,7 +29,7 @@ def test_backoff_doubles_each_attempt(r):
         while (leased := q.lease()) is None:
             time.sleep(0.02)
         q.fail(job_id, leased[1], "boom")
-        delays.append(r.zscore(q.pending_key, job_id) - server_now(r))
+        delays.append(r.zscore(q.delayed_key, job_id) - server_now(r))
 
     # Expect about 0.1, 0.2, 0.4 seconds
     for actual, expected in zip(delays, [0.1, 0.2, 0.4]):
@@ -43,7 +43,7 @@ def test_backoff_is_capped(r):
     _, token = q.lease()
     q.fail(job_id, token, "boom")
 
-    delay = r.zscore(q.pending_key, job_id) - server_now(r)
+    delay = r.zscore(q.delayed_key, job_id) - server_now(r)
     assert delay <= 5  # not 2^20 seconds
 
 
@@ -57,7 +57,7 @@ def test_jitter_spreads_out_retries(r):
         q.fail(job_id, token, "db down")
 
     elapsed = server_now(r) - start
-    delays = [score - start for _, score in r.zrange(q.pending_key, 0, -1, withscores=True)]
+    delays = [score - start for _, score in r.zrange(q.delayed_key, 0, -1, withscores=True)]
     assert all(0 <= d <= 10 + elapsed for d in delays)
     assert max(delays) - min(delays) > 3  # spread out, not bunched together
 

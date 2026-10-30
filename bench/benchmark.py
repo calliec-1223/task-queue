@@ -144,7 +144,7 @@ def main() -> None:
 
     r = redis.Redis.from_url(config.redis_url())
     q = Queue(r, name=config.queue_name())
-    if r.zcard(q.pending_key) or r.zcard(q.inflight_key):
+    if q.count_waiting() or r.zcard(q.inflight_key):
         raise SystemExit("queue isn't empty; wait for it to drain so old jobs don't skew results")
     pg = db.connect()
     pg.autocommit = True

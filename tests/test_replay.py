@@ -43,7 +43,7 @@ def test_replay_refuses_jobs_that_are_not_dead(r):
 
     assert q.replay(job_id) is False
     assert q.get_job(job_id)["status"] == "leased"
-    assert r.zscore(q.pending_key, job_id) is None
+    assert q.count_waiting() == 0  # not put back in the queue
 
 
 def test_replay_dead_only_replays_matching_errors(r):

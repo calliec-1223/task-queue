@@ -146,10 +146,12 @@ class HistoryWriter:
 
         if kind == "enqueued":
             sql(
-                """INSERT INTO jobs (id, queue, payload, status, max_attempts, created_at, updated_at)
-                   VALUES (%s, %s, %s, 'pending', %s, to_timestamp(%s), to_timestamp(%s))
+                """INSERT INTO jobs (id, queue, payload, status, max_attempts, priority,
+                                    created_at, updated_at)
+                   VALUES (%s, %s, %s, 'pending', %s, %s, to_timestamp(%s), to_timestamp(%s))
                    ON CONFLICT (id) DO NOTHING""",  # already recorded: do nothing
-                (job_id, e["queue"], Jsonb(json.loads(e["payload"])), int(e["max_attempts"]), ts, ts),
+                (job_id, e["queue"], Jsonb(json.loads(e["payload"])), int(e["max_attempts"]),
+                 int(e.get("priority", 0)), ts, ts),
             )
 
         elif kind == "leased":

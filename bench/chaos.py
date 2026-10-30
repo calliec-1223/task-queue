@@ -78,7 +78,7 @@ def main() -> None:
 
     r = redis.Redis.from_url(config.redis_url())
     q = Queue(r, name=config.queue_name())
-    if r.zcard(q.pending_key) or r.zcard(q.inflight_key):
+    if q.count_waiting() or r.zcard(q.inflight_key):
         raise SystemExit("queue isn't empty; wait for it to drain first")
     pg = db.connect()
     pg.autocommit = True
@@ -112,7 +112,7 @@ def main() -> None:
     # Wait until Redis has nothing left to do and history has caught up.
     deadline = time.time() + 600
     while time.time() < deadline:
-        busy = r.zcard(q.pending_key) + r.zcard(q.inflight_key) + r.xlen(q.events_key)
+        busy = q.count_waiting() + r.zcard(q.inflight_key) + r.xlen(q.events_key)
         if busy == 0:
             break
         time.sleep(1)
@@ -149,14 +149,14 @@ def main() -> None:
         "dead_lettered": stats[2],
         "unfinished": stats[3],
         # Lost = submitted but neither finished in history nor still waiting in Redis.
-        "still_in_redis": r.zcard(q.pending_key) + r.zcard(q.inflight_key),
-        "lost": jobs - stats[1] - stats[2] - (r.zcard(q.pending_key) + r.zcard(q.inflight_key)),
+        "still_in_redis": q.count_waiting() + r.zcard(q.inflight_key),
+        "lost": jobs - stats[1] - stats[2] - (q.count_waiting() + r.zcard(q.inflight_key)),
         "worker_kills": sum(1 for k in kills if "worker" in k["killed"]),
         "history_writer_kills": sum(1 for k in kills if "history" in k["killed"]),
         "attempts_interrupted_by_kill": attempts[0],
         "jobs_interrupted_at_least_once": attempts[1],
         "jobs_recorded_done_twice": attempts[2],
-        "left_in_redis": {"pending": r.zcard(q.pending_key), "inflight": r.zcard(q.inflight_key)},
+        "left_in_redis": {"waiting": q.count_waiting(), "inflight": r.zcard(q.inflight_key)},
     }
     for k, v in result.items():
         print(f"{k:32} {v}")

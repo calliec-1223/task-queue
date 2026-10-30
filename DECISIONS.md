@@ -149,3 +149,13 @@ Each entry records a choice, the alternatives considered, and why.
   - *Checkpoints only*: stops most re-runs but not two separate jobs created by a double submission.
 - **Why**: The queue is at-least-once, so duplicates come from two places, submission and execution. Each needs its own fix.
 - **Limits accepted**: If a worker's lease expires while it's still running, another worker can start the same job at the same time, and both do the work. Checkpoints keep the recorded result consistent (the first finisher's), but only the external service supporting idempotency keys could stop the second call. Exactly-once execution isn't achievable inside the queue. Checkpoints are kept on the job hash in Redis.
+
+## 18. Priority: separate "delayed" and "ready" sets, with aging
+
+- **Decision**: The single `pending` set became two. `delayed` holds jobs waiting on a delay or retry backoff, scored by when they become ready. `ready` holds jobs that can run now, scored by *the time they became ready − priority × 60 s*. Each lease first moves due jobs from `delayed` to `ready`, then takes the lowest score. Any integer priority works; default 0.
+- **Alternatives**:
+  - *One pending set per priority level*: the smallest change, but a fixed number of levels, up to one lookup per level on every lease, and every other part (reaper, replay, metrics) needs to know all the sets.
+  - *Fold priority into the existing score*: one set and almost no code, but it breaks the design: a high-priority job delayed 30 minutes would look ready immediately.
+- **Why**: Any number of levels, first-come-first-served within a level, one lookup per lease, and "score = time" still holds for delayed jobs, so delays and backoff are untouched.
+- **Starvation**: *Aging*, not strict priority. Each priority level is worth 60 seconds of waiting (default, set per queue), so a lower-priority job that has waited longer than that catches up with new higher-priority jobs. Strict priority was simpler but lets a steady stream of urgent jobs block everything else forever. The 60 s step is my default; it's stored once in Redis so every producer and worker uses the same value.
+- **Tradeoffs accepted**: The biggest core change so far (enqueue, lease, retries, reaper, replay and metrics all changed). Each lease does a small "move what's due" step, capped at 1,000 jobs per lease; if more than that become due at the same instant, priority ordering among them is approximate until the backlog clears.

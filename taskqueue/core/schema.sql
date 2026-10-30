@@ -43,3 +43,7 @@ CREATE TABLE IF NOT EXISTS dead_events (
     failures   INT NOT NULL,
     dead_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Added with job priority. ADD COLUMN IF NOT EXISTS keeps this safe to re-run
+-- on databases created before the column existed.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS priority INT NOT NULL DEFAULT 0;

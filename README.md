@@ -2,7 +2,7 @@
 
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
-> Status: core queue, PostgreSQL history, benchmarks, failure injection, and a real integration with my recipe app are done. In progress: job priority.
+> Status: all six reliability features are built (leases, retries with backoff, dead-letter queue, idempotency, delayed and priority jobs, benchmarks and failure tests), plus PostgreSQL history and a real integration with my recipe app.
 
 ## Architecture
 
@@ -35,8 +35,7 @@ flowchart LR
 - **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
 - **Idempotency keys**: submitting a job with the same key twice returns the original job instead of a duplicate. The check and the create are one atomic script, so even simultaneous submissions create one job.
 - **Result checkpoints**: a finished task's result is saved before the ack. If the job is redelivered (the worker crashed or lost its lease before acking), the next worker reuses the result instead of redoing the work.
-
-Planned: priority.
+- **Priority with aging**: higher-priority jobs run first, but each priority level is worth 60 seconds of waiting, so a lower-priority job that has waited long enough catches up and nothing starves. Delayed and retrying jobs wait in a separate set, so priority never lets a job run before its time.
 
 ## Getting started
 
@@ -76,6 +75,7 @@ Submit jobs:
 python -m taskqueue.enqueue echo '{"msg": "hello"}'          # runs right away
 python -m taskqueue.enqueue sleep '{"seconds": 5}' --delay 10  # ready in 10 seconds
 python -m taskqueue.enqueue fail --max-attempts 3             # always fails: retries, then dead-letters
+python -m taskqueue.enqueue echo '{"msg": "urgent"}' --priority 5  # runs ahead of priority-0 jobs
 ```
 
 Watch it live at http://localhost:8000. It shows where jobs are right now (ready, waiting, running, done, dead), jobs completed and attempts failed per second over the last minute, and recent jobs with their status and errors. Raw numbers are at http://localhost:8000/metrics as JSON.
@@ -96,7 +96,7 @@ Settings (environment variables): `REDIS_URL`, `QUEUE_NAME`, `LEASE_SECONDS`.
 
 ## Benchmarks
 
-All numbers below come from real runs ([raw results](bench/results/)) on an Apple M2 MacBook (8 cores), with every service running in Docker Compose. Workers run 20 ms jobs (`sleep`), standing in for I/O-bound work like an API call.
+All numbers below come from real runs ([raw results](bench/results/)), measured before priority was added (which changed how jobs are leased), on an Apple M2 MacBook (8 cores), with every service running in Docker Compose. Workers run 20 ms jobs (`sleep`), standing in for I/O-bound work like an API call.
 
 ### Throughput scales almost linearly with workers
 
