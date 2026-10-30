@@ -11,6 +11,8 @@ Redis layout (for a queue named "default"):
     tq:default:inflight       zset   -> job ids, score = time the lease expires
     tq:default:dead           zset   -> job ids, score = time the job was dead-lettered
     tq:default:finished       zset   -> done job ids, score = time finished (cleanup() removes old ones)
+    tq:default:workers        zset   -> worker ids, score = last time the worker checked in
+    tq:default:worker:<id>    hash   -> that worker's status: host, current job, jobs done/failed
     tq:default:events         stream -> history events for PostgreSQL (the "outbox")
     tq:default:idem:<key>     string -> job id created with this idempotency key (expires)
 
@@ -163,6 +165,28 @@ return removed
 """
 
 # KEYS: (none)  ARGV: job_key, result_json
+# KEYS: workers, worker_key  ARGV: worker_id, field1, value1, field2, value2, ...
+_WORKER_BEAT = _NOW + """
+-- A worker checks in (about once a second): score = now, plus its status.
+redis.call('ZADD', KEYS[1], now, ARGV[1])
+local args = {'HSET', KEYS[2], 'id', ARGV[1], 'last_seen', tostring(now)}
+for i = 2, #ARGV do table.insert(args, ARGV[i]) end
+redis.call(unpack(args))
+return 1
+"""
+
+# KEYS: workers  ARGV: worker_key_prefix, remove_after_seconds
+_PRUNE_WORKERS = _NOW + """
+-- Workers silent for this long are gone for good (crashed or killed):
+-- remove them so the list doesn't grow forever.
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now - tonumber(ARGV[2]), 'LIMIT', 0, 100)
+for _, id in ipairs(ids) do
+    redis.call('ZREM', KEYS[1], id)
+    redis.call('DEL', ARGV[1] .. id)
+end
+return #ids
+"""
+
 _CHECKPOINT = """
 -- Save a finished task's result, unless an earlier attempt already saved one.
 -- First finisher wins; everyone gets back the same stored result.
@@ -328,6 +352,8 @@ class Queue:
         self.inflight_key = f"tq:{name}:inflight"
         self.dead_key = f"tq:{name}:dead"
         self.finished_key = f"tq:{name}:finished"
+        self.workers_key = f"tq:{name}:workers"
+        self.worker_prefix = f"tq:{name}:worker:"
         self.events_key = f"tq:{name}:events"
         self.retry_base = retry_base_seconds
         self.retry_cap = retry_cap_seconds
@@ -346,6 +372,8 @@ class Queue:
         self._replay_batch = client.register_script(_REPLAY_BATCH)
         self._checkpoint = client.register_script(_CHECKPOINT)
         self._cleanup = client.register_script(_CLEANUP)
+        self._worker_beat = client.register_script(_WORKER_BEAT)
+        self._prune_workers = client.register_script(_PRUNE_WORKERS)
 
     def enqueue(
         self,
@@ -493,6 +521,45 @@ class Queue:
             if done:
                 break
         return total
+
+    # ---- Worker registry (for visibility; not needed for correctness) ----------
+
+    def worker_beat(self, worker_id: str, **status) -> None:
+        """A worker checks in with its current status (call about once a second)."""
+        flat = [str(x) for pair in status.items() for x in pair]
+        self._worker_beat(keys=[self.workers_key, self.worker_prefix + worker_id],
+                          args=[worker_id, *flat])
+
+    def remove_worker(self, worker_id: str) -> None:
+        """A worker shutting down cleanly removes itself, so it never shows as dead."""
+        with self.r.pipeline() as p:  # MULTI/EXEC: both or neither
+            p.zrem(self.workers_key, worker_id)
+            p.delete(self.worker_prefix + worker_id)
+            p.execute()
+
+    def prune_workers(self, remove_after: float = 60) -> int:
+        """Remove workers that haven't checked in for remove_after seconds."""
+        return self._prune_workers(keys=[self.workers_key],
+                                   args=[self.worker_prefix, remove_after])
+
+    def list_workers(self, dead_after: float = 5) -> list[dict]:
+        """Every registered worker, with "alive" False if silent for dead_after seconds."""
+        sec, usec = self.r.time()
+        now = sec + usec / 1_000_000
+        ids = [i.decode() for i in self.r.zrange(self.workers_key, 0, -1)]
+        with self.r.pipeline(transaction=False) as p:
+            for worker_id in ids:
+                p.hgetall(self.worker_prefix + worker_id)
+            records = p.execute()
+        workers = []
+        for rec in records:
+            if not rec:
+                continue  # removed between the two reads
+            w = {k.decode(): v.decode() for k, v in rec.items()}
+            w["seconds_since_seen"] = now - float(w["last_seen"])
+            w["alive"] = w["seconds_since_seen"] <= dead_after
+            workers.append(w)
+        return workers
 
     def count_waiting(self) -> int:
         """Jobs not yet leased: ready now, or waiting on a delay or backoff."""

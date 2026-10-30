@@ -188,3 +188,13 @@ Each entry records a choice, the alternatives considered, and why.
   - *Classify automatically by exception type*: no work for task authors, but it guesses wrong and is hard to defend.
 - **Why**: The list covers whole error types in one visible place; the exception covers the edge cases, because the task knows its own errors. Unlisted errors are still retried, so the safe default stays "retry."
 - **Tradeoffs accepted**: Two mechanisms to explain. A wrongly-listed error type dead-letters jobs that might have succeeded; replay recovers them.
+
+## 22. Worker registry: a sorted set scored by "last seen"
+
+- **Decision**: Each worker checks in about once a second from its own presence thread: `tq:<queue>:workers` (score = last check-in) plus a small status record (host, current job, jobs done and failed). A worker silent for 5 s shows as dead; after 60 s the reaper removes it. A clean shutdown removes the worker immediately, so only crashes, kills and timeouts show as dead.
+- **Alternatives**:
+  - *One self-expiring key per worker*: no cleanup code, but a dead worker just vanishes (you can't show it dying), and listing workers means scanning all of Redis.
+  - *No registry; show running jobs*: no core change, but idle workers are invisible and there's no worker identity.
+- **Why**: It shows the whole cycle, working → dead → removed, and reuses the "score = time" pattern. Listing workers is one sorted-set read.
+- **Details**: Check-ins come from a separate thread because a busy worker's main thread is stuck inside the task (job heartbeats are only every 10 s). The worker ID has a random suffix so a restarted container doesn't look like the worker that died.
+- **Tradeoffs accepted**: One more structure and a removal rule. The registry is for visibility only; nothing in job processing depends on it.

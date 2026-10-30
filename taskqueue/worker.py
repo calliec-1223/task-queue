@@ -14,6 +14,8 @@ Settings come from environment variables:
 import logging
 import os
 import signal
+import socket
+import uuid
 import threading
 import time
 
@@ -74,6 +76,13 @@ class Worker:
         # Tests pass a function instead, so pytest isn't killed.
         self.on_job_abandoned = on_job_abandoned or _exit_process
         self._last_cleanup = 0.0
+        # Registry identity. The random suffix keeps a restarted worker (same
+        # container, maybe same process id) from looking like the dead one.
+        self.worker_id = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:4]}"
+        self._status = {"status": "idle", "job": "", "task": "", "job_started": ""}
+        self._jobs_done = 0
+        self._jobs_failed = 0
+        self._stop_presence = threading.Event()
         self._last_reap = 0.0
         self._stopping = False
 
@@ -82,14 +91,43 @@ class Worker:
         # Finish the current job before exiting instead of dying mid-job.
         signal.signal(signal.SIGINT, self._request_stop)
         signal.signal(signal.SIGTERM, self._request_stop)
-        log.info("worker started")
+        log.info("worker %s started", self.worker_id)
+        self.start_presence()
         wait = self.min_poll_interval
-        while not self._stopping:
-            found = self.run_once()
-            if not found:
-                time.sleep(wait)  # queue empty: poll again after a short wait
-            wait = self.next_wait(wait, found)
+        try:
+            while not self._stopping:
+                found = self.run_once()
+                if not found:
+                    time.sleep(wait)  # queue empty: poll again after a short wait
+                wait = self.next_wait(wait, found)
+        finally:
+            self.stop_presence()
         log.info("worker stopped")
+
+    def start_presence(self, interval: float = 1.0) -> None:
+        """Check in with the worker registry every `interval` seconds, from its own
+        thread, so a worker busy with a long task still shows as alive. If the
+        process dies, the check-ins stop: that's how the dashboard sees it die."""
+        def loop():
+            while not self._stop_presence.wait(interval):
+                self._beat()
+        self._beat()
+        threading.Thread(target=loop, daemon=True).start()
+
+    def stop_presence(self) -> None:
+        self._stop_presence.set()
+        try:
+            self.queue.remove_worker(self.worker_id)  # clean exit: not "dead"
+        except redis.RedisError:
+            pass
+
+    def _beat(self) -> None:
+        try:
+            self.queue.worker_beat(
+                self.worker_id, host=socket.gethostname(), pid=os.getpid(),
+                jobs_done=self._jobs_done, jobs_failed=self._jobs_failed, **self._status)
+        except redis.RedisError as e:
+            log.warning("registry check-in failed: %s", e)
 
     def next_wait(self, wait: float, found_job: bool) -> float:
         """Idle wait before the next check: reset after a job, else double (capped)."""
@@ -107,6 +145,8 @@ class Worker:
         job_id, token = leased
         job = self.queue.get_job(job_id)
         log.info("job %s leased (attempt %d/%d)", job_id, job["attempts"], job["max_attempts"])
+        self._status = {"status": "busy", "job": job_id, "task": job["payload"].get("task", ""),
+                        "job_started": job.get("started_at", "")}
 
         # Heartbeat in a background thread while the task runs.
         stop_heartbeat = threading.Event()
@@ -144,12 +184,15 @@ class Worker:
         if error is None:
             if self.queue.ack(job_id, token, result):
                 log.info("job %s done", job_id)
+                self._jobs_done += 1
             else:
                 log.warning("job %s: lease was lost before ack (another worker owns it)", job_id)
         else:
             outcome = self.queue.fail(job_id, token, error, retry=not permanent)
+            self._jobs_failed += 1
             log.warning("job %s failed (%s%s): %s", job_id, outcome or "lease lost",
                         ", permanent" if permanent else "", error)
+        self._status = {"status": "idle", "job": "", "task": "", "job_started": ""}
         return True
 
     def _run_task(self, payload: dict):
@@ -184,6 +227,7 @@ class Worker:
             reaped = self.queue.reap_expired()
             if reaped:
                 log.info("reaped %d expired lease(s)", reaped)
+            self.queue.prune_workers()  # forget workers silent for a minute
         # Less often: remove old finished and dead jobs from Redis memory.
         if now - self._last_cleanup >= self.cleanup_interval:
             self._last_cleanup = now
