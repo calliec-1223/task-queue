@@ -87,6 +87,16 @@ Watch it live at http://localhost:8000. It shows where jobs are right now (ready
 
 Started by Docker Compose, or directly with `python -m taskqueue.metrics`.
 
+The dashboard also shows every **worker** (busy with which job, idle, or dead in red after a crash, then removed), and clicking a job shows its **attempt timeline** from history (e.g. "attempt 1: lease expired → attempt 2: done").
+
+**Demo mode** adds buttons to submit sample jobs, crash a random worker, and replay dead jobs. It's off by default and only for local use:
+
+```bash
+DEMO_CONTROLS=1 LEASE_SECONDS=6 docker compose up -d --build --scale worker=4
+```
+
+A short lease makes a killed worker's job recover in seconds. "Kill a worker" sets a flag in Redis that the chosen worker sees on its next check-in, then exits instantly like a crash (the dashboard never gets access to Docker itself).
+
 Inspect and replay the dead-letter queue:
 
 ```bash

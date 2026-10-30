@@ -112,6 +112,40 @@
   code { font-family: var(--mono); font-size: 12px; background: var(--bg); padding: 2px 6px; border-radius: 4px; }
   .notice { padding: 12px 16px; margin-top: 10px; color: var(--text-secondary); font-size: 13px; display: none; }
 
+  /* Demo controls */
+  .demo { display: none; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 14px; margin-top: 16px; }
+  .demo .label { font-size: 12px; color: var(--text-muted); margin-right: 4px; }
+  button {
+    font: inherit; font-size: 13px; color: var(--text-primary); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 7px; padding: 6px 11px; cursor: pointer;
+  }
+  button:hover { border-color: var(--text-muted); }
+  button:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
+  button.danger { color: var(--critical); }
+  .toast { font-size: 12px; color: var(--text-secondary); margin-left: auto; }
+
+  /* Workers */
+  .workers { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; }
+  .worker { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; transition: border-color .3s, opacity .3s; }
+  .worker .wid { font-family: var(--mono); font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .worker .state { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .worker .detail { font-size: 12px; color: var(--text-secondary); min-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .worker .counts { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .worker.dead { border-color: var(--critical); }
+  .worker.dead .detail { color: var(--critical); }
+  .bar { height: 3px; border-radius: 2px; background: var(--grid); overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--series-1); }
+
+  /* Job timeline */
+  tbody#recent tr { cursor: pointer; }
+  tbody#recent tr:hover td, tbody#recent tr.selected td { background: var(--bg); }
+  .timeline { display: none; padding: 16px; margin-top: 10px; }
+  .timeline h3 { margin: 0 0 4px; font-size: 15px; }
+  .timeline .meta { font-size: 12px; color: var(--text-muted); margin-bottom: 12px; font-family: var(--mono); }
+  .attempt { display: grid; grid-template-columns: 90px 1fr; gap: 12px; padding: 8px 0; border-top: 1px solid var(--grid); font-size: 13px; }
+  .attempt .when { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .attempt .err { font-family: var(--mono); font-size: 12px; color: var(--text-secondary); margin-top: 2px; word-break: break-word; }
+
   @media (max-width: 760px) {
     .flow { grid-template-columns: 1fr; }
     .arrow { justify-content: center; transform: rotate(90deg); height: 18px; }
@@ -126,10 +160,21 @@
     <div class="live" id="live"><span class="dot"></span><span id="live-text">Connecting…</span></div>
   </header>
 
+  <div class="card demo" id="demo">
+    <span class="label">Demo</span>
+    <button data-submit="mixed">Submit 20 jobs</button>
+    <button data-submit="urgent">Submit 5 urgent</button>
+    <button data-submit="slow">Submit 4 slow</button>
+    <button data-submit="fail">Submit 2 failing</button>
+    <button class="danger" id="kill">Kill a worker</button>
+    <button id="replay">Replay dead jobs</button>
+    <span class="toast" id="toast" role="status"></span>
+  </div>
+
   <h2>Where jobs are right now</h2>
   <div class="flow">
     <div class="card stage">
-      <div class="stage-title">pending set</div>
+      <div class="stage-title">ready + delayed sets</div>
       <div class="stage split">
         <div class="stat"><div class="n" id="ready">–</div><div class="label">Ready</div><div class="hint">can run now</div></div>
         <div class="stat"><div class="n" id="delayed">–</div><div class="label">Waiting</div><div class="hint">delay or retry backoff</div></div>
@@ -156,6 +201,9 @@
   </div>
   <div class="card notice" id="pg-notice">PostgreSQL is unreachable, so only live queue numbers are shown. Workers keep running; history will catch up when it's back.</div>
 
+  <h2>Workers</h2>
+  <div class="workers" id="workers"></div>
+
   <h2>Last 60 seconds</h2>
   <div class="card chart-card">
     <div class="legend">
@@ -179,6 +227,7 @@
       <tbody id="recent"></tbody>
     </table>
   </div>
+  <div class="card timeline" id="timeline" aria-live="polite"></div>
 </main>
 
 <script>
@@ -297,6 +346,9 @@ async function refresh() {
     ? `<span class="flag" title="Inspect with: python -m src.dlq list">${ICONS.dead} needs attention</span>`
     : "gave up after max attempts";
 
+  renderWorkers(m.workers || [], m.now);
+  $("demo").style.display = m.demo ? "flex" : "none";
+
   const hist = m.history;
   $("pg-notice").style.display = hist ? "none" : "block";
   if (!hist) return;
@@ -317,7 +369,7 @@ async function refresh() {
   drawChartTable();
 
   $("recent").innerHTML = hist.recent.length
-    ? hist.recent.map((j) => `<tr>
+    ? hist.recent.map((j) => `<tr data-id="${esc(j.id)}" class="${j.id === selectedJob ? "selected" : ""}" title="Show this job's timeline">
         <td class="id">${esc(j.id.slice(0, 8))}</td>
         <td class="task">${esc(j.task)}</td>
         <td><span class="status">${ICONS[j.status] || ""}${LABELS[j.status] || esc(j.status)}</span></td>
@@ -327,8 +379,94 @@ async function refresh() {
     : `<tr><td colspan="6" class="empty">No jobs yet. Try <code>python -m src.enqueue echo '{"msg": "hi"}' --count 50</code></td></tr>`;
 }
 
+// ---- Workers ------------------------------------------------------------
+function renderWorkers(workers, now) {
+  if (!workers.length) {
+    $("workers").innerHTML = '<div class="card empty">No workers running. Start one with <code>python -m taskqueue.worker</code>.</div>';
+    return;
+  }
+  $("workers").innerHTML = workers.map((w) => {
+    const short = w.id.split("-").slice(-2).join("-");
+    let state, detail, bar = "";
+    if (!w.alive) {
+      const removeIn = Math.max(0, Math.ceil(60 - w.seconds_since_seen));
+      state = `${ICONS.dead} Dead`;
+      detail = `silent for ${Math.round(w.seconds_since_seen)}s · removed in ${removeIn}s`;
+    } else if (w.status === "busy") {
+      const elapsed = w.job_started ? Math.max(0, now - parseFloat(w.job_started)) : 0;
+      state = `${ICONS.leased} Busy`;
+      detail = `${esc(w.task)} · ${esc(w.job.slice(0, 8))} · ${elapsed.toFixed(1)}s`;
+      bar = `<div class="bar"><i style="width:${Math.min(100, elapsed / 3 * 100)}%"></i></div>`;
+    } else {
+      state = `${ICONS.pending} Idle`;
+      detail = "waiting for work";
+    }
+    return `<div class="card worker ${w.alive ? "" : "dead"}">
+      <div class="wid" title="${esc(w.id)}">${esc(short)}</div>
+      <div class="state">${state}</div>
+      <div class="detail">${detail}</div>${bar}
+      <div class="counts">${w.jobs_done} done · ${w.jobs_failed} failed</div>
+    </div>`;
+  }).join("");
+}
+
+// ---- Job timeline -------------------------------------------------------
+let selectedJob = null;
+const OUTCOME = { done: ["done", "Done"], error: ["dead", "Error"], lease_expired: ["dead", "Lease expired"] };
+
+async function showTimeline(jobId) {
+  selectedJob = jobId;
+  const res = await fetch(`/jobs/${jobId}`, { cache: "no-store" });
+  if (!res.ok) { $("timeline").style.display = "none"; return; }
+  const t = await res.json();
+  const start = t.attempts.length ? t.attempts[0].started_at : t.created_at;
+  const rows = t.attempts.map((a) => {
+    const [icon, label] = a.finished_at ? (OUTCOME[a.outcome] || ["pending", a.outcome]) : ["leased", "Running"];
+    const took = a.finished_at ? `${(a.finished_at - a.started_at).toFixed(2)}s` : "…";
+    return `<div class="attempt">
+      <div class="when">+${(a.started_at - t.created_at).toFixed(2)}s</div>
+      <div><span class="status">${ICONS[icon]}Attempt ${a.number}: ${label}</span> <span style="color:var(--text-muted)">· ${took}</span>
+        ${a.error && a.error !== "lease expired" ? `<div class="err">${esc(a.error)}</div>` : ""}</div>
+    </div>`;
+  }).join("") || '<div class="empty">Not started yet.</div>';
+  $("timeline").innerHTML = `<h3>${esc(t.task)} <span class="status" style="font-weight:400">${ICONS[t.status] || ""}${LABELS[t.status] || esc(t.status)}</span></h3>
+    <div class="meta">${esc(t.id)} · priority ${t.priority} · max ${t.max_attempts} attempts${t.finished_at ? ` · total ${(t.finished_at - t.created_at).toFixed(2)}s` : ""}</div>
+    <div class="attempt"><div class="when">+0.00s</div><div>Enqueued</div></div>${rows}`;
+  $("timeline").style.display = "block";
+  document.querySelectorAll("#recent tr").forEach((tr) => tr.classList.toggle("selected", tr.dataset.id === jobId));
+}
+
+$("recent").addEventListener("click", (ev) => {
+  const tr = ev.target.closest("tr[data-id]");
+  if (tr) showTimeline(tr.dataset.id);
+});
+
+// ---- Demo controls ------------------------------------------------------
+const COUNTS = { mixed: 20, urgent: 5, slow: 4, fail: 2 };
+async function demo(path, body) {
+  try {
+    const res = await fetch(path, { method: "POST", headers: { "X-Demo": "1" }, body: JSON.stringify(body || {}) });
+    return await res.json();
+  } catch { return { error: "request failed" }; }
+}
+function toast(msg) { $("toast").textContent = msg; }
+document.querySelectorAll("[data-submit]").forEach((b) => b.addEventListener("click", async () => {
+  const kind = b.dataset.submit;
+  const r = await demo("/demo/submit", { kind, count: COUNTS[kind] });
+  toast(r.error || `Submitted ${r.submitted} ${kind} job(s)`);
+}));
+$("kill").addEventListener("click", async () => {
+  const r = await demo("/demo/kill");
+  toast(r.error || `Killing ${r.killed.split("-").slice(-2).join("-")}: watch it turn red`);
+});
+$("replay").addEventListener("click", async () => {
+  const r = await demo("/demo/replay");
+  toast(r.error || `Replayed ${r.replayed} dead job(s)`);
+});
+
 refresh();
 setInterval(refresh, 1000);
+setInterval(() => selectedJob && showTimeline(selectedJob), 2000);
 window.addEventListener("resize", () => series.length && drawChart());
 </script>
 </body>

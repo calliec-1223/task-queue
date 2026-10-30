@@ -111,6 +111,7 @@ class Worker:
         def loop():
             while not self._stop_presence.wait(interval):
                 self._beat()
+                self._check_demo_kill()
         self._beat()
         threading.Thread(target=loop, daemon=True).start()
 
@@ -118,6 +119,21 @@ class Worker:
         self._stop_presence.set()
         try:
             self.queue.remove_worker(self.worker_id)  # clean exit: not "dead"
+        except redis.RedisError:
+            pass
+
+    def _check_demo_kill(self) -> None:
+        """Demo controls only: the dashboard asked this worker to crash. Exit at
+        once with no cleanup, exactly like a SIGKILL, so the dashboard shows the
+        real recovery (dead worker, lease expiry, job retried elsewhere)."""
+        if os.environ.get("DEMO_CONTROLS") != "1":
+            return
+        key = f"tq:{self.queue.name}:demo:kill:{self.worker_id}"
+        try:
+            if self.queue.r.delete(key):
+                log.warning("demo: crashing on purpose")
+                logging.shutdown()
+                os._exit(9)
         except redis.RedisError:
             pass
 
