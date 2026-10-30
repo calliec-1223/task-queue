@@ -373,7 +373,7 @@ async function refresh() {
         <td class="id">${esc(j.id.slice(0, 8))}</td>
         <td class="task">${esc(j.task)}</td>
         <td><span class="status">${ICONS[j.status] || ""}${LABELS[j.status] || esc(j.status)}</span></td>
-        <td class="num">${j.attempts}</td>
+        <td class="num">${j.attempt} of ${j.max_attempts}${j.replays ? ` <span style="color:var(--text-muted)">· replayed ${j.replays}×</span>` : ""}</td>
         <td class="err" title="${esc(j.last_error)}">${esc(j.last_error) || "—"}</td>
         <td>${ago(j.updated_at, m.now)}</td></tr>`).join("")
     : `<tr><td colspan="6" class="empty">No jobs yet. Try <code>python -m src.enqueue echo '{"msg": "hi"}' --count 50</code></td></tr>`;
@@ -420,12 +420,17 @@ async function showTimeline(jobId) {
   if (!res.ok) { $("timeline").style.display = "none"; return; }
   const t = await res.json();
   const start = t.attempts.length ? t.attempts[0].started_at : t.created_at;
+  let round = 0;
   const rows = t.attempts.map((a) => {
+    // Replay restarts numbering at 1: mark where each new round begins.
+    const divider = a.number === 1 && round++ > 0
+      ? `<div class="attempt"><div class="when"></div><div style="color:var(--text-muted)">Replayed: round ${round}, attempts start over (max ${t.max_attempts})</div></div>`
+      : "";
     const [icon, label] = a.finished_at ? (OUTCOME[a.outcome] || ["pending", a.outcome]) : ["leased", "Running"];
     const took = a.finished_at ? `${(a.finished_at - a.started_at).toFixed(2)}s` : "…";
-    return `<div class="attempt">
+    return `${divider}<div class="attempt">
       <div class="when">+${(a.started_at - t.created_at).toFixed(2)}s</div>
-      <div><span class="status">${ICONS[icon]}Attempt ${a.number}: ${label}</span> <span style="color:var(--text-muted)">· ${took}</span>
+      <div><span class="status">${ICONS[icon]}Attempt ${a.number} of ${t.max_attempts}: ${label}</span> <span style="color:var(--text-muted)">· ${took}</span>
         ${a.error && a.error !== "lease expired" ? `<div class="err">${esc(a.error)}</div>` : ""}</div>
     </div>`;
   }).join("") || '<div class="empty">Not started yet.</div>';

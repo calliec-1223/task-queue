@@ -122,11 +122,16 @@ def _history(conn: psycopg.Connection) -> dict:
         (WINDOW_SECONDS,),
     ).fetchall()
 
+    # Replay restarts attempt numbers at 1, so each "attempt 1" starts a round.
+    # The latest attempt's number is how far into the current round the job is.
     recent = q(
         """SELECT j.id, j.payload->>'task', j.status, j.last_error,
-                  extract(epoch FROM j.updated_at),
-                  (SELECT count(*) FROM job_attempts a WHERE a.job_id = j.id)
-           FROM jobs j ORDER BY j.updated_at DESC LIMIT 12"""
+                  extract(epoch FROM j.updated_at), j.max_attempts,
+                  count(a.*) FILTER (WHERE a.attempt_number = 1),
+                  (SELECT a2.attempt_number FROM job_attempts a2 WHERE a2.job_id = j.id
+                   ORDER BY a2.started_at DESC LIMIT 1)
+           FROM jobs j LEFT JOIN job_attempts a ON a.job_id = j.id
+           GROUP BY j.id ORDER BY j.updated_at DESC LIMIT 12"""
     ).fetchall()
 
     return {
@@ -136,8 +141,9 @@ def _history(conn: psycopg.Connection) -> dict:
         "failed_per_second": {int(t): n for t, n in failed},
         "recent": [
             {"id": str(i), "task": task, "status": status, "last_error": err,
-             "updated_at": float(ts), "attempts": attempts}
-            for i, task, status, err, ts, attempts in recent
+             "updated_at": float(ts), "max_attempts": max_attempts,
+             "attempt": attempt or 0, "replays": max(0, rounds - 1)}
+            for i, task, status, err, ts, max_attempts, rounds, attempt in recent
         ],
     }
 
