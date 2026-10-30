@@ -2,7 +2,7 @@
 
 A distributed task queue built from scratch in Python, using Redis for the queue and PostgreSQL for job history. It focuses on reliability: jobs survive worker crashes, failed jobs retry with backoff, and repeatedly failing jobs go to a dead-letter queue. No Celery or RQ; building the queue is the point.
 
-> Status: all four phases complete: core queue, PostgreSQL history, benchmarks and failure injection, and a real integration with my recipe app.
+> Status: core queue, PostgreSQL history, benchmarks, failure injection, and a real integration with my recipe app are done. In progress: idempotency (duplicate protection) and job priority.
 
 ## Architecture
 
