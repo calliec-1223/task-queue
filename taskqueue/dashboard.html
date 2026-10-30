@@ -414,7 +414,8 @@ function renderWorkers(workers, now) {
 
 // ---- Job timeline -------------------------------------------------------
 let selectedJob = null;
-const OUTCOME = { done: ["done", "Done"], error: ["dead", "Error"], lease_expired: ["dead", "Lease expired"] };
+const OUTCOME = { done: ["done", "Done"], error: ["dead", "Error"], lease_expired: ["dead", "Lease expired"],
+                  released: ["pending", "Handed back during shutdown (not counted)"] };
 
 async function showTimeline(jobId) {
   selectedJob = jobId;

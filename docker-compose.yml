@@ -8,6 +8,7 @@ x-app-env: &app-env
   POLL_INTERVAL: ${POLL_INTERVAL:-0.5}
   POLL_MIN_INTERVAL: ${POLL_MIN_INTERVAL:-0.01}
   DEMO_CONTROLS: ${DEMO_CONTROLS:-0}
+  SHUTDOWN_GRACE_SECONDS: ${SHUTDOWN_GRACE_SECONDS:-25}
 
 x-app: &app
   build: .
@@ -63,7 +64,7 @@ services:
     command: ["python", "-m", "taskqueue.worker"]
     deploy:
       replicas: 3
-    stop_grace_period: 30s
+    stop_grace_period: 30s  # workers hand back unfinished jobs after SHUTDOWN_GRACE_SECONDS (25 s), before this runs out
 
   history:
     <<: *app

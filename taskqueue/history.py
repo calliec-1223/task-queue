@@ -279,6 +279,11 @@ class HistoryWriter:
             self._set_job(job_id, ts, status="dead" if dead else "pending",
                           last_error=e["error"], finished=dead)
 
+        elif kind == "released":
+            # Handed back on shutdown: not a failure, and not counted.
+            self._finish_attempt(e["lease_token"], ts, "released", None)
+            self._set_job(job_id, ts, status="pending")
+
         elif kind == "replayed":
             self._set_job(job_id, ts, status="pending", clear_finished=True)
 

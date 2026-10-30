@@ -226,3 +226,13 @@ Each entry records a choice, the alternatives considered, and why.
 - **Why**: Correct even when a writer freezes, with failover in about 10 s. It's the same idea as job lease tokens, applied to the writer: a lock with a timeout decides who *should* write; the fencing token makes sure a stale writer *can't*.
 - **Tradeoffs accepted**: The most moving parts of the three (a lock, renewals, a token table, and a check in every batch). Like the advisory lock, it relies on PostgreSQL for the final check, which is fine because the writer only writes to PostgreSQL.
 - **Verified**: in Docker with two writers, killing the active one with SIGKILL: the standby took over with the next token and drained the backlog.
+
+## 26. Graceful shutdown: wait up to 25 s, then hand the job back
+
+- **Decision**: On a stop signal the worker keeps running its current job for up to `SHUTDOWN_GRACE_SECONDS` (25 s, inside Docker's 30 s stop window). If the job finishes, it's acked normally. If not, the worker calls `release()`, which returns the job to the ready set with its attempt undone and its priority kept (one atomic script, lease-token checked), and the process exits. History records the attempt as `released`, not a failure.
+- **Alternatives**:
+  - *Stop window as long as the longest job*: no code and no repeated work, but a deploy could take 5+ minutes.
+  - *Hand back immediately*: fast deploys, but every in-progress job is thrown away and redone, even ones a second from finishing.
+- **Why**: Short jobs (the common case) finish without repeated work; long ones are handed back without losing an attempt; deploy time stays bounded.
+- **Tradeoffs accepted**: Long jobs are still redone from the start (at-least-once). If a job finishes at the same moment it's released, the token check lets only one win; if the release wins, the next worker reuses the saved result checkpoint instead of redoing it.
+- **Verified**: `docker stop` on a worker running a 40 s job: it waited 25 s, handed the job back, exited with code 0, and another worker took it as attempt 1.

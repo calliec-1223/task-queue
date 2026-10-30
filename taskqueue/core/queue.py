@@ -174,7 +174,6 @@ if removed < tonumber(ARGV[4]) then purge(KEYS[2], tonumber(ARGV[3])) end
 return removed
 """
 
-# KEYS: (none)  ARGV: job_key, result_json
 # KEYS: workers, worker_key  ARGV: worker_id, field1, value1, field2, value2, ...
 _WORKER_BEAT = _NOW + """
 -- A worker checks in (about once a second): score = now, plus its status.
@@ -197,6 +196,26 @@ end
 return #ids
 """
 
+# KEYS: delayed, ready, config, inflight, events  ARGV: job_key, job_id, lease_token
+_RELEASE = _NOW + """
+local delayed_key, ready_key, config_key, events_key = KEYS[1], KEYS[2], KEYS[3], KEYS[5]
+""" + _EMIT + _SCHEDULE + """
+-- Hand a running job back without penalty (e.g. the worker is shutting down).
+-- Only the current lease holder can release it.
+if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return 0 end
+redis.call('ZREM', KEYS[4], ARGV[2])
+-- Undo this attempt: it didn't fail, it was interrupted on purpose.
+if tonumber(redis.call('HGET', ARGV[1], 'attempts')) > 0 then
+    redis.call('HINCRBY', ARGV[1], 'attempts', -1)
+end
+redis.call('HDEL', ARGV[1], 'lease_token')
+redis.call('HSET', ARGV[1], 'status', 'pending')
+schedule(ARGV[1], ARGV[2], now)  -- ready right away, same priority
+emit('released', ARGV[2], {'lease_token', ARGV[3]})
+return 1
+"""
+
+# KEYS: (none)  ARGV: job_key, result_json
 _CHECKPOINT = """
 -- Save a finished task's result, unless an earlier attempt already saved one.
 -- First finisher wins; everyone gets back the same stored result.
@@ -421,6 +440,7 @@ class Queue:
         self._replay_batch = client.register_script(_REPLAY_BATCH)
         self._discard = client.register_script(_DISCARD)
         self._checkpoint = client.register_script(_CHECKPOINT)
+        self._release = client.register_script(_RELEASE)
         self._cleanup = client.register_script(_CLEANUP)
         self._worker_beat = client.register_script(_WORKER_BEAT)
         self._prune_workers = client.register_script(_PRUNE_WORKERS)
@@ -500,6 +520,17 @@ class Queue:
             keys=[self.inflight_key, self.events_key, self.finished_key],
             # default=str: results that aren't plain JSON are stored as text.
             args=[JOB_PREFIX + job_id, job_id, lease_token, json.dumps(result, default=str)],
+        )
+        return ok == 1
+
+    def release(self, job_id: str, lease_token: str) -> bool:
+        """Hand a running job back to the queue without using up an attempt
+        (e.g. the worker is shutting down). Returns False if this lease is no
+        longer valid (the job already finished or went to another worker)."""
+        ok = self._release(
+            keys=[self.delayed_key, self.ready_key, self.config_key, self.inflight_key,
+                  self.events_key],
+            args=[JOB_PREFIX + job_id, job_id, lease_token],
         )
         return ok == 1
 

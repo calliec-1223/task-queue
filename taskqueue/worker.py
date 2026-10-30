@@ -54,6 +54,8 @@ class Worker:
         reap_interval: float = 1.0,
         cleanup_interval: float = 60.0,
         on_job_abandoned=None,
+        shutdown_grace_seconds: float = 25.0,
+        on_shutdown_exit=None,
     ):
         self.queue = queue
         # Plain functions are allowed too; wrap them so every entry is a Task.
@@ -85,6 +87,12 @@ class Worker:
         self._stop_presence = threading.Event()
         self._last_reap = 0.0
         self._stopping = False
+        # On a stop signal, the current job gets this long to finish. After that
+        # it's handed back (release) and the process exits, before Docker's own
+        # 30 s stop window runs out and kills it mid-job.
+        self.shutdown_grace_seconds = shutdown_grace_seconds
+        self._shutdown_deadline = None
+        self.on_shutdown_exit = on_shutdown_exit or (lambda: os._exit(0))
 
     def run(self) -> None:
         """Loop until asked to stop (Ctrl-C or SIGTERM)."""
@@ -219,10 +227,19 @@ class Worker:
         return self.tasks[name].fn(**payload.get("args", {}))
 
     def _heartbeat(self, job_id: str, token: str, stop: threading.Event, deadline: float) -> None:
-        # Wake at the next regular heartbeat, or right at the time limit if that
-        # comes first, so a hung job is abandoned on time. stop.wait() returns
-        # True as soon as stop is set, so this exits promptly when the job ends.
-        while not stop.wait(max(0.0, min(self.heartbeat_interval, deadline - time.monotonic()) + 0.01)):
+        # Checks a few times a second (cheap, all local) so it reacts on time to
+        # the job's time limit and to the shutdown deadline; it only talks to
+        # Redis at each regular heartbeat or when the time limit is reached.
+        # stop.wait() returns True as soon as the job ends, so this exits promptly.
+        next_beat = time.monotonic() + self.heartbeat_interval
+        while not stop.wait(0.2):
+            now = time.monotonic()
+            if self._shutdown_deadline is not None and now >= self._shutdown_deadline:
+                self._hand_back(job_id, token)
+                return
+            if now < next_beat and now < deadline:
+                continue
+            next_beat = now + self.heartbeat_interval
             try:
                 status = self.queue.heartbeat(job_id, token, self.lease_seconds)
                 if status != "ok":
@@ -251,9 +268,28 @@ class Worker:
             if removed:
                 log.info("cleaned up %d old job(s) from Redis", removed)
 
+    def _hand_back(self, job_id: str, token: str) -> None:
+        """Shutdown deadline reached with the job still running: return it to
+        the queue without using up an attempt, then exit."""
+        try:
+            if self.queue.release(job_id, token):
+                log.warning("job %s still running at shutdown; handed back to the queue", job_id)
+        except redis.RedisError as e:
+            log.warning("job %s: release failed (%s); its lease will expire instead", job_id, e)
+        self.stop_presence()
+        logging.shutdown()
+        self.on_shutdown_exit()
+
+    def request_stop(self) -> None:
+        """Finish the current job if it ends within shutdown_grace_seconds;
+        otherwise hand it back. Then stop."""
+        if not self._stopping:
+            log.info("stop requested: finishing current job (up to %.0f s)", self.shutdown_grace_seconds)
+            self._stopping = True
+            self._shutdown_deadline = time.monotonic() + self.shutdown_grace_seconds
+
     def _request_stop(self, signum, frame) -> None:
-        log.info("stop requested, finishing current job")
-        self._stopping = True
+        self.request_stop()
 
 
 def _exit_process(job_id: str, status: str) -> None:
@@ -273,6 +309,7 @@ def main() -> None:
         # How long an idle worker waits before checking for jobs again.
         poll_interval=float(os.environ.get("POLL_INTERVAL", 0.5)),
         min_poll_interval=float(os.environ.get("POLL_MIN_INTERVAL", 0.01)),
+        shutdown_grace_seconds=float(os.environ.get("SHUTDOWN_GRACE_SECONDS", 25)),
     ).run()
 
 

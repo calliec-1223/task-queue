@@ -61,3 +61,9 @@ CREATE TABLE IF NOT EXISTS history_fence (
     queue  TEXT PRIMARY KEY,
     token  BIGINT NOT NULL
 );
+
+-- Added with graceful shutdown: an attempt handed back on purpose ("released")
+-- doesn't count as a failure. DROP + ADD keeps this safe to re-run.
+ALTER TABLE job_attempts DROP CONSTRAINT IF EXISTS job_attempts_outcome_check;
+ALTER TABLE job_attempts ADD CONSTRAINT job_attempts_outcome_check
+    CHECK (outcome IN ('done', 'error', 'lease_expired', 'released'));
