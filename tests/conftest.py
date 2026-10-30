@@ -47,7 +47,7 @@ def pg():
             admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(TEST_PG_DB)))
 
     conn = db.connect(TEST_PG_DB)
-    conn.execute("DROP TABLE IF EXISTS job_attempts, jobs, dead_events")
+    conn.execute("DROP TABLE IF EXISTS job_attempts, jobs, dead_events, history_fence")
     db.init_schema(conn)
     conn.commit()
     yield conn

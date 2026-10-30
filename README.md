@@ -35,6 +35,7 @@ flowchart LR
 - **Dead-letter queue**: after `max_attempts` failures, including worker crashes, a job moves to a dead-letter set so poison jobs can't loop forever.
 - **Discard**: jobs that will never succeed can be removed from the dead-letter queue (one, or every job whose error matches). History records them as `discarded`, so nothing is lost.
 - **Dead-letter replay**: after fixing the cause of an outage, replay one dead job or every job whose error matches. Bulk replay runs in small batches so Redis never stalls the workers.
+- **Single active history writer**: writers compete for a Redis lock and the holder writes; a fencing token checked in PostgreSQL rejects any batch from a writer that froze and was replaced, so history stays in order even during failover.
 - **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
 - **Idempotency keys**: submitting a job with the same key twice returns the original job instead of a duplicate. The check and the create are one atomic script, so even simultaneous submissions create one job.
 - **Result checkpoints**: a finished task's result is saved before the ack. If the job is redelivered (the worker crashed or lost its lease before acking), the next worker reuses the result instead of redoing the work.
@@ -196,7 +197,8 @@ Load test: Whisk on gunicorn with 2 server processes. Some users chat back to ba
 These are deliberate tradeoffs or not-yet-built pieces, not bugs:
 
 - **Redis is a single point of failure.** There's no replica or failover. Redis saves every write to disk once per second, so a restart keeps the queue, but if the whole machine crashes, up to about 1 second of changes can be lost (jobs and their history events are lost together, so they never disagree).
-- **One history writer per queue.** Events for a job must be applied in order, so there's one writer. That caps how fast history can be written; if the writer falls behind, events wait in Redis memory.
+- **One active history writer per queue.** Events for a job must be applied in order, so only one writer writes at a time (others wait on standby and take over within about 10 s; a fencing token stops a frozen writer from writing late). That caps how fast history can be written; if the writer falls behind, events wait in Redis memory. History writer throughput hasn't been benchmarked yet.
+- **Single Redis server only.** The Lua scripts build some key names inside the script, which Redis Cluster doesn't allow, so scaling past one Redis server would mean redesigning the key layout.
 - **Workers poll.** Sorted sets have no "wait until a job arrives" command, so idle workers check periodically (adaptive backoff, 10–500 ms). That adds some pickup latency and idle Redis load.
 - **At-least-once, not exactly-once.** If a worker freezes long enough to lose its lease but is still alive, another worker can run the same job at the same time. Result checkpoints keep the recorded result consistent, but both runs do the work.
 

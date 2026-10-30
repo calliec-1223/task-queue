@@ -54,3 +54,10 @@ ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_status_check;
 ALTER TABLE jobs ADD CONSTRAINT jobs_status_check
     CHECK (status IN ('pending', 'leased', 'done', 'dead', 'discarded'));
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS discarded_at TIMESTAMPTZ;
+
+-- Single-writer fencing for the history writer: the highest token that has
+-- written for each queue. A writer with an older token is rejected.
+CREATE TABLE IF NOT EXISTS history_fence (
+    queue  TEXT PRIMARY KEY,
+    token  BIGINT NOT NULL
+);

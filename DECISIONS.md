@@ -216,3 +216,13 @@ Each entry records a choice, the alternatives considered, and why.
   - *Load shedding by priority*: keeps urgent work flowing, but the most complex, and pushing out already-accepted jobs breaks the promise that an accepted job is never lost.
 - **Why**: Overload becomes visible to the caller, who can respond sensibly (Whisk says "busy, try again in a minute"), and Redis memory, which also holds the history outbox, stays protected.
 - **Tradeoffs accepted**: Every producer must handle `QueueFull`; one that ignores it loses that work.
+
+## 25. One active history writer: Redis lock plus a fencing token checked in PostgreSQL
+
+- **Decision**: History writers compete for a Redis lock (`SET NX PX`, 10 s expiry, renewed about every 3 s only by the holder). Each new holder gets the next number from a counter: the fencing token. Every batch transaction first records its token in a `history_fence` table in PostgreSQL, but only if no newer token exists; otherwise the batch is rejected and rolled back. Writers without the lock wait on standby and take over when it expires. All writers share one consumer name, so a new holder picks up its predecessor's unconfirmed events.
+- **Alternatives**:
+  - *Redis lock with expiry only*: simple, but a writer that freezes past the expiry can wake up and write one more batch after a standby took over, so two writers write at once.
+  - *PostgreSQL advisory lock on the write connection*: correct by construction and little code, but a writer that's frozen yet still connected keeps the lock, so history stalls until the connection times out.
+- **Why**: Correct even when a writer freezes, with failover in about 10 s. It's the same idea as job lease tokens, applied to the writer: a lock with a timeout decides who *should* write; the fencing token makes sure a stale writer *can't*.
+- **Tradeoffs accepted**: The most moving parts of the three (a lock, renewals, a token table, and a check in every batch). Like the advisory lock, it relies on PostgreSQL for the final check, which is fine because the writer only writes to PostgreSQL.
+- **Verified**: in Docker with two writers, killing the active one with SIGKILL: the standby took over with the next token and drained the backlog.
