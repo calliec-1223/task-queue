@@ -92,13 +92,14 @@ end
 # job from inflight. `rand` is a number in [0, 1) chosen in Python (jitter).
 # Expects locals: now, dead_key, base, cap, plus emit() and schedule().
 _RETRY_OR_DEAD = """
-local function retry_or_dead(job_key, id, rand, event_type, error)
+local function retry_or_dead(job_key, id, rand, event_type, error, permanent)
     local token = redis.call('HGET', job_key, 'lease_token') or ''
     redis.call('HDEL', job_key, 'lease_token')  -- this lease is over
     local attempts = tonumber(redis.call('HGET', job_key, 'attempts'))
     local max_attempts = tonumber(redis.call('HGET', job_key, 'max_attempts'))
     local outcome
-    if attempts >= max_attempts then
+    -- A permanent error can never succeed, so skip the remaining retries.
+    if permanent or attempts >= max_attempts then
         redis.call('ZADD', dead_key, now, id)
         redis.call('HSET', job_key, 'status', 'dead')
         outcome = 'dead'
@@ -227,7 +228,7 @@ return 1
 """
 
 # KEYS: delayed, ready, config, inflight, dead, events
-# ARGV: job_key, job_id, lease_token, error, base, cap, rand
+# ARGV: job_key, job_id, lease_token, error, base, cap, rand, retryable (1/0)
 _FAIL = _NOW + """
 local delayed_key, ready_key, config_key = KEYS[1], KEYS[2], KEYS[3]
 local inflight_key, dead_key, events_key = KEYS[4], KEYS[5], KEYS[6]
@@ -237,7 +238,7 @@ local base, cap = tonumber(ARGV[5]), tonumber(ARGV[6])
 if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return false end
 redis.call('ZREM', inflight_key, ARGV[2])
 redis.call('HSET', ARGV[1], 'last_error', ARGV[4])
-return retry_or_dead(ARGV[1], ARGV[2], tonumber(ARGV[7]), 'failed', ARGV[4])
+return retry_or_dead(ARGV[1], ARGV[2], tonumber(ARGV[7]), 'failed', ARGV[4], ARGV[8] == '0')
 """
 
 # KEYS: delayed, ready, config, inflight, dead, events
@@ -260,7 +261,7 @@ for i, id in ipairs(ids) do
         err = 'timed out after ' .. (f[2] or '300') .. ' s'
     end
     redis.call('HSET', job_key, 'last_error', err)
-    retry_or_dead(job_key, id, tonumber(ARGV[4 + i]), 'lease_expired', err)
+    retry_or_dead(job_key, id, tonumber(ARGV[4 + i]), 'lease_expired', err, false)
 end
 return #ids
 """
@@ -430,9 +431,11 @@ class Queue:
         )
         return {1: "ok", 0: "lost", -1: "timed_out"}[result]
 
-    def fail(self, job_id: str, lease_token: str, error: str) -> str | None:
+    def fail(self, job_id: str, lease_token: str, error: str, retry: bool = True) -> str | None:
         """Report that the job raised an error.
 
+        retry=False means the error can never succeed, so the job goes straight
+        to the dead-letter set instead of using up its remaining attempts.
         Returns "retry" (rescheduled with backoff), "dead" (moved to the
         dead-letter set), or None if this lease is no longer valid.
         """
@@ -440,7 +443,7 @@ class Queue:
             keys=[self.delayed_key, self.ready_key, self.config_key, self.inflight_key,
                   self.dead_key, self.events_key],
             args=[JOB_PREFIX + job_id, job_id, lease_token, error,
-                  self.retry_base, self.retry_cap, self.jitter()],
+                  self.retry_base, self.retry_cap, self.jitter(), 1 if retry else 0],
         )
         return result.decode() if result else None
 

@@ -178,3 +178,13 @@ Each entry records a choice, the alternatives considered, and why.
   - *Give tasks a deadline and trust them*: no machinery, but only protects tasks written correctly, not the unexpected hang this is meant to catch.
 - **Why**: It reuses the lease and reaper machinery and is enforced centrally, so buggy task code can't dodge it.
 - **Tradeoffs accepted**: Python can't kill a thread, so the stuck task stops only because its whole worker process exits, which needs a supervisor (Docker here). A worker that loses its lease for any reason now also exits, to stop doing duplicate work. Jobs leased before this change have no limit.
+
+## 21. Errors that shouldn't be retried: a per-task list plus `PermanentError`
+
+- **Decision**: Both. A task can be registered as `Task(fn, no_retry=(SomeError, ...))` to list error types that never succeed on retry, and any task can raise `PermanentError` for cases only it can recognize. Either way the worker calls `fail(..., retry=False)`, which sends the job straight to the dead-letter queue in the same atomic script. Unknown task names are now permanent too.
+- **Alternatives**:
+  - *Only the exception*: explicit, but every task must catch and convert errors itself, and it's easy to miss one.
+  - *Only a per-task list*: keeps task code clean, but matches by type only, so it can't handle cases where the same exception type is sometimes temporary and sometimes not.
+  - *Classify automatically by exception type*: no work for task authors, but it guesses wrong and is hard to defend.
+- **Why**: The list covers whole error types in one visible place; the exception covers the edge cases, because the task knows its own errors. Unlisted errors are still retried, so the safe default stays "retry."
+- **Tradeoffs accepted**: Two mechanisms to explain. A wrongly-listed error type dead-letters jobs that might have succeeded; replay recovers them.

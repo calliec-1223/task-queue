@@ -20,10 +20,25 @@ import time
 import redis
 
 from taskqueue import config
+from dataclasses import dataclass
+
 from taskqueue.core.queue import Queue
+from taskqueue.errors import PermanentError
 from taskqueue.tasks import TASKS
 
 log = logging.getLogger("worker")
+
+
+@dataclass
+class Task:
+    """A task function plus the exception types that should never be retried.
+
+    tasks={"send": send}                                     # every error retried
+    tasks={"send": Task(send, no_retry=(BadRequestError,))}  # these go straight to dead
+    A task can also raise PermanentError itself for cases only it can recognize.
+    """
+    fn: callable
+    no_retry: tuple = ()
 
 
 class Worker:
@@ -39,7 +54,8 @@ class Worker:
         on_job_abandoned=None,
     ):
         self.queue = queue
-        self.tasks = tasks
+        # Plain functions are allowed too; wrap them so every entry is a Task.
+        self.tasks = {name: t if isinstance(t, Task) else Task(t) for name, t in tasks.items()}
         self.lease_seconds = lease_seconds
         # Heartbeat 3x per lease, so two heartbeats can be late or lost
         # before the lease expires (the "slack" from DECISIONS.md #3).
@@ -102,6 +118,7 @@ class Worker:
         heartbeat.start()
 
         error = None
+        permanent = False
         result = None
         try:
             done_before, saved = self.queue.get_checkpoint(job_id)
@@ -114,6 +131,11 @@ class Worker:
                 result = self.queue.save_checkpoint(job_id, self._run_task(job["payload"]))
         except Exception as e:  # any error in the task counts as a failed attempt
             error = f"{type(e).__name__}: {e}"
+            # Never retry if the task said so (PermanentError), or if this error
+            # type is on the task's no_retry list.
+            task = self.tasks.get(job["payload"].get("task"))
+            permanent = isinstance(e, PermanentError) or (
+                task is not None and isinstance(e, task.no_retry))
         finally:
             # Stop heartbeats before ack/fail, so a heartbeat can't race the ack.
             stop_heartbeat.set()
@@ -125,15 +147,17 @@ class Worker:
             else:
                 log.warning("job %s: lease was lost before ack (another worker owns it)", job_id)
         else:
-            outcome = self.queue.fail(job_id, token, error)
-            log.warning("job %s failed (%s): %s", job_id, outcome or "lease lost", error)
+            outcome = self.queue.fail(job_id, token, error, retry=not permanent)
+            log.warning("job %s failed (%s%s): %s", job_id, outcome or "lease lost",
+                        ", permanent" if permanent else "", error)
         return True
 
     def _run_task(self, payload: dict):
         name = payload.get("task")
         if name not in self.tasks:
-            raise ValueError(f"unknown task: {name!r}")
-        return self.tasks[name](**payload.get("args", {}))
+            # Retrying can't make an unknown task exist.
+            raise PermanentError(f"unknown task: {name!r}")
+        return self.tasks[name].fn(**payload.get("args", {}))
 
     def _heartbeat(self, job_id: str, token: str, stop: threading.Event, deadline: float) -> None:
         # Wake at the next regular heartbeat, or right at the time limit if that
