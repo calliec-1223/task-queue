@@ -238,6 +238,9 @@ function drawChart() {
   const last = series[series.length - 1];
   let yd = y(last.done), yf = y(last.failed);
   if (Math.abs(yd - yf) < 14) { if (yd <= yf) { yf = yd + 14; } else { yd = yf + 14; } }
+  // Keep both labels above the time axis labels.
+  const lowest = pad.t + h - 6, shift = Math.max(0, Math.max(yd, yf) - lowest);
+  yd -= shift; yf -= shift;
   out += `<text class="direct" x="${pad.l + w + 8}" y="${yd + 4}">Completed ${last.done}/s</text>`;
   out += `<text class="direct" x="${pad.l + w + 8}" y="${yf + 4}">Failed ${last.failed}/s</text>`;
 
@@ -303,7 +306,9 @@ async function refresh() {
 
   const nowSec = Math.floor(m.now);
   series = [];
-  for (let t = nowSec - 59; t <= nowSec; t++) {
+  // Stop at the last complete second: the current one is still filling up
+  // and would always show a misleading dip to 0.
+  for (let t = nowSec - 60; t <= nowSec - 1; t++) {
     series.push({ t, done: hist.done_per_second[t] || 0, failed: hist.failed_per_second[t] || 0 });
   }
   const last10 = series.slice(-10).reduce((a, d) => a + d.done, 0) / 10;
