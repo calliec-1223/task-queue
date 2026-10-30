@@ -35,6 +35,7 @@ class Worker:
         poll_interval: float = 0.5,
         min_poll_interval: float = 0.01,
         reap_interval: float = 1.0,
+        cleanup_interval: float = 60.0,
     ):
         self.queue = queue
         self.tasks = tasks
@@ -49,6 +50,8 @@ class Worker:
         self.poll_interval = poll_interval
         self.min_poll_interval = min(min_poll_interval, poll_interval)
         self.reap_interval = reap_interval
+        self.cleanup_interval = cleanup_interval
+        self._last_cleanup = 0.0
         self._last_reap = 0.0
         self._stopping = False
 
@@ -144,6 +147,12 @@ class Worker:
             reaped = self.queue.reap_expired()
             if reaped:
                 log.info("reaped %d expired lease(s)", reaped)
+        # Less often: remove old finished and dead jobs from Redis memory.
+        if now - self._last_cleanup >= self.cleanup_interval:
+            self._last_cleanup = now
+            removed = self.queue.cleanup()
+            if removed:
+                log.info("cleaned up %d old job(s) from Redis", removed)
 
     def _request_stop(self, signum, frame) -> None:
         log.info("stop requested, finishing current job")

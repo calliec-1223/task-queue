@@ -10,6 +10,7 @@ Redis layout (for a queue named "default"):
     tq:default:config         hash   -> priority_step (seconds of waiting one priority level is worth)
     tq:default:inflight       zset   -> job ids, score = time the lease expires
     tq:default:dead           zset   -> job ids, score = time the job was dead-lettered
+    tq:default:finished       zset   -> done job ids, score = time finished (cleanup() removes old ones)
     tq:default:events         stream -> history events for PostgreSQL (the "outbox")
     tq:default:idem:<key>     string -> job id created with this idempotency key (expires)
 
@@ -138,6 +139,27 @@ emit('enqueued', ARGV[2], {'queue', ARGV[6], 'payload', ARGV[3], 'max_attempts',
 return ARGV[2]
 """
 
+# KEYS: finished, dead
+# ARGV: job_prefix, finished_before, dead_before, batch_size
+_CLEANUP = """
+-- Delete the Redis copy of jobs that finished, or died, long enough ago.
+-- Their permanent record is in PostgreSQL history. Limited to batch_size jobs
+-- per call, so this script never blocks Redis for long.
+local removed = 0
+local function purge(set_key, before)
+    local ids = redis.call('ZRANGEBYSCORE', set_key, '-inf', before,
+                           'LIMIT', 0, tonumber(ARGV[4]) - removed)
+    for _, id in ipairs(ids) do
+        redis.call('ZREM', set_key, id)
+        redis.call('DEL', ARGV[1] .. id)
+        removed = removed + 1
+    end
+end
+purge(KEYS[1], tonumber(ARGV[2]))
+if removed < tonumber(ARGV[4]) then purge(KEYS[2], tonumber(ARGV[3])) end
+return removed
+"""
+
 # KEYS: (none)  ARGV: job_key, result_json
 _CHECKPOINT = """
 -- Save a finished task's result, unless an earlier attempt already saved one.
@@ -169,7 +191,7 @@ emit('leased', id, {'lease_token', ARGV[3], 'attempt', tostring(attempt)})
 return id
 """
 
-# KEYS: inflight, events  ARGV: job_key, job_id, lease_token, result_json
+# KEYS: inflight, events, finished  ARGV: job_key, job_id, lease_token, result_json
 _ACK = _NOW + "local events_key = KEYS[2]\n" + _EMIT + """
 -- Only the worker holding the current lease may ack. A worker whose lease
 -- already expired (and the job went to someone else) gets rejected.
@@ -177,6 +199,8 @@ if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return 0 end
 redis.call('ZREM', KEYS[1], ARGV[2])
 redis.call('HSET', ARGV[1], 'status', 'done')
 redis.call('HDEL', ARGV[1], 'lease_token')
+-- Remember when it finished, so cleanup() can remove it from Redis later.
+redis.call('ZADD', KEYS[3], now, ARGV[2])
 emit('acked', ARGV[2], {'lease_token', ARGV[3], 'result', ARGV[4]})
 return 1
 """
@@ -286,6 +310,7 @@ class Queue:
         self.config_key = f"tq:{name}:config"
         self.inflight_key = f"tq:{name}:inflight"
         self.dead_key = f"tq:{name}:dead"
+        self.finished_key = f"tq:{name}:finished"
         self.events_key = f"tq:{name}:events"
         self.retry_base = retry_base_seconds
         self.retry_cap = retry_cap_seconds
@@ -303,6 +328,7 @@ class Queue:
         self._replay_one = client.register_script(_REPLAY_ONE)
         self._replay_batch = client.register_script(_REPLAY_BATCH)
         self._checkpoint = client.register_script(_CHECKPOINT)
+        self._cleanup = client.register_script(_CLEANUP)
 
     def enqueue(
         self,
@@ -362,7 +388,7 @@ class Queue:
     def ack(self, job_id: str, lease_token: str, result: Any = None) -> bool:
         """Mark a job done. Returns False if this lease is no longer valid."""
         ok = self._ack(
-            keys=[self.inflight_key, self.events_key],
+            keys=[self.inflight_key, self.events_key, self.finished_key],
             # default=str: results that aren't plain JSON are stored as text.
             args=[JOB_PREFIX + job_id, job_id, lease_token, json.dumps(result, default=str)],
         )
@@ -443,6 +469,28 @@ class Queue:
     def count_waiting(self) -> int:
         """Jobs not yet leased: ready now, or waiting on a delay or backoff."""
         return self.r.zcard(self.ready_key) + self.r.zcard(self.delayed_key)
+
+    def cleanup(self, done_ttl: float = 86400, dead_ttl: float = 30 * 86400,
+                batch_size: int = 100, max_batches: int = 10) -> int:
+        """Remove the Redis copy of jobs done more than done_ttl seconds ago and
+        dead-lettered more than dead_ttl seconds ago (which takes them out of the
+        dead-letter queue for good). History in PostgreSQL is kept.
+
+        Works in batches so Redis is never blocked for long. Returns how many
+        jobs were removed.
+        """
+        sec, usec = self.r.time()  # Redis clock, like everything else
+        now = sec + usec / 1_000_000
+        total = 0
+        for _ in range(max_batches):
+            removed = self._cleanup(
+                keys=[self.finished_key, self.dead_key],
+                args=[JOB_PREFIX, now - done_ttl, now - dead_ttl, batch_size],
+            )
+            total += removed
+            if removed < batch_size:
+                break
+        return total
 
     def list_dead(self, count: int = 20) -> list[dict]:
         """The oldest dead jobs, with their last error."""

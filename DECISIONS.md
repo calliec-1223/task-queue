@@ -160,3 +160,12 @@ Each entry records a choice, the alternatives considered, and why.
 - **Why**: Any number of levels, first-come-first-served within a level, one lookup per lease, and "score = time" still holds for delayed jobs, so delays and backoff are untouched.
 - **Starvation**: *Aging*, not strict priority. Each priority level is worth 60 seconds of waiting (default, set per queue), so a lower-priority job that has waited longer than that catches up with new higher-priority jobs. Strict priority was simpler but lets a steady stream of urgent jobs block everything else forever. The 60 s step is my default; it's stored once in Redis so every producer and worker uses the same value.
 - **Tradeoffs accepted**: The biggest core change so far (enqueue, lease, retries, reaper, replay and metrics all changed). Each lease does a small "move what's due" step, capped at 1,000 jobs per lease; if more than that become due at the same instant, priority ordering among them is approximate until the backlog clears.
+
+## 19. Cleanup of finished jobs: a "finished" set plus a batched sweep
+
+- **Decision**: On ack, a job joins a `finished` sorted set scored by finish time. `cleanup()` deletes the Redis copy of jobs done more than 24 hours ago and dead-lettered more than 30 days ago (which removes them from the dead-letter queue for good), in batches of 100. Workers run it once a minute. PostgreSQL history keeps every job.
+- **Alternatives**:
+  - *Auto-expire on ack (Redis EXPIRE)*: one line and no sweep, but dead jobs would still pile up forever if nobody looks at them.
+  - *Delete on ack*: least memory, but a finished job would briefly exist in neither Redis nor history (history lags slightly), so tools couldn't find it. (Its history isn't lost; events wait in the stream.)
+- **Why**: The only option that also bounds an ignored dead-letter queue, and you can see how many finished jobs are waiting to be cleaned.
+- **Tradeoffs accepted**: Another sorted set and Lua script; the sweep is batched like replay so it never blocks Redis. A dead job older than 30 days can no longer be replayed. The 24-hour and 30-day defaults are mine, adjustable per call.
