@@ -11,13 +11,15 @@ flowchart LR
     P[Producers] -->|enqueue| R[(Redis queue)]
     R -->|lease job| W[Workers]
     W -->|ack / fail| R
-    W -->|history| DB[(PostgreSQL)]
+    R -->|event stream| H[History writer]
+    H -->|batched, idempotent writes| DB[(PostgreSQL)]
 ```
 
 - **Producers** submit jobs.
 - **Redis** holds pending jobs.
 - **Workers** lease jobs, run them, and report results.
-- **PostgreSQL** stores job history: a `jobs` table with each job's current state, and a `job_attempts` table with one permanent row per attempt (in progress).
+- **PostgreSQL** stores job history: a `jobs` table with each job's current state, and a `job_attempts` table with one permanent row per attempt.
+- **History writer** copies events from Redis into PostgreSQL. Each job change and its history event are written in the same atomic Redis step (the outbox pattern), so history can't miss a change, and a PostgreSQL outage never slows the workers.
 
 ## Features
 
@@ -30,6 +32,7 @@ flowchart LR
 - **Retries with backoff and jitter**: a failed job waits a random time between 0 and `base × 2^(attempts−1)` (capped) before retrying, so jobs that fail together don't retry together.
 - **Dead-letter queue**: after `max_attempts` failures, including worker crashes, a job moves to a dead-letter set so poison jobs can't loop forever.
 - **Dead-letter replay**: after fixing the cause of an outage, replay one dead job or every job whose error matches. Bulk replay runs in small batches so Redis never stalls the workers.
+- **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events.
 
 Planned: idempotency, priority.
 
@@ -48,10 +51,11 @@ python -m src.db init            # creates the PostgreSQL tables
 
 ## Usage
 
-Start a worker (run several in separate terminals to scale out):
+Start a worker (run several in separate terminals to scale out) and the history writer:
 
 ```bash
 python -m src.worker
+python -m src.history
 ```
 
 Submit jobs:

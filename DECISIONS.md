@@ -80,3 +80,14 @@ Each entry records a choice, the alternatives considered, and why.
 - **Why**: Current status is a simple lookup, and every attempt is kept, even across replays.
 - **Detail**: The lease token is the attempt's primary key. After a replay, Redis restarts attempt numbers at 1, so "job X, attempt 1" can happen twice; tokens never repeat. It also means the same attempt can't be recorded twice.
 - **Tradeoffs accepted**: Two writes per attempt, and a join to see a job together with its history.
+
+## 11. History reaches PostgreSQL through an event stream in Redis (outbox pattern)
+
+- **Decision**: Every Lua script that changes a job also appends an event to a Redis Stream (`tq:<queue>:events`) in the same atomic step. A separate history writer reads the stream through a consumer group, writes each batch to PostgreSQL in one transaction, and only then confirms the events (`XACK`) and deletes them.
+- **Alternatives**:
+  - *Workers write to PostgreSQL right after each Redis step*: simple and instant, but a crash between the two writes loses that history forever, and a slow PostgreSQL slows every job.
+  - *Periodic sync of Redis state into PostgreSQL*: workers don't change, but anything that happens between syncs (like a failed attempt) is never recorded.
+- **Why**: The others can lose history. Here a change and its event happen together or not at all, so history can't miss a change Redis has saved.
+- **How duplicates are handled**: Events are confirmed after the commit, so a writer crash can cause redelivery (at-least-once). Every write is idempotent (`ON CONFLICT DO NOTHING`, or updates that set the same values), so applying an event twice is harmless.
+- **Tradeoffs accepted**: One more process to run. History lags slightly. If the writer is down, events pile up in Redis memory. Exactly one writer per queue, so events for a job are applied in order. Redis's ~1 second disk-sync window (#9) still applies, but state and events are lost together, so they never disagree.
+- **Why Streams here but not for the queue (#2)**: Here Redis only needs to be a reliable ordered log with redelivery, which is exactly what Streams provide. For the queue I wanted to design lease and retry logic myself, and Streams don't support delayed jobs.

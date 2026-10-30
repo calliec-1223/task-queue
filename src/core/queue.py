@@ -6,11 +6,17 @@ Redis layout (for a queue named "default"):
     tq:default:pending        zset   -> job ids, score = time the job becomes ready
     tq:default:inflight       zset   -> job ids, score = time the lease expires
     tq:default:dead           zset   -> job ids, score = time the job was dead-lettered
+    tq:default:events         stream -> history events for PostgreSQL (the "outbox")
 
 Every multi-step change runs inside a Lua script so Redis executes it as one
 atomic step: no other client can see or change the data halfway through.
 All times come from the Redis server clock (TIME), not the worker's clock, so
 workers with slightly wrong clocks can't break lease expiry.
+
+Each script that changes a job also appends a history event to the events
+stream in the same atomic step. So a change and its event either both happen
+or neither does: history can't silently miss a change. A separate history
+writer (src/history.py) copies events into PostgreSQL.
 
 Failure rule (used by both fail() and reap_expired()):
     if attempts < max_attempts: retry after exponential backoff with jitter
@@ -20,7 +26,7 @@ Failure rule (used by both fail() and reap_expired()):
 import json
 import random
 import uuid
-from typing import Callable
+from typing import Any, Callable
 
 import redis
 
@@ -32,40 +38,56 @@ local t = redis.call('TIME')
 local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
 """
 
-# Shared Lua helper: the failure rule. Callers must already have removed the
-# job from inflight. `rand` is a number in [0, 1) chosen in Python (jitter).
-# Expects locals: now, pending_key, dead_key, base, cap.
-_RETRY_OR_DEAD = """
-local function retry_or_dead(job_key, id, rand)
-    redis.call('HDEL', job_key, 'lease_token')  -- this lease is over
-    local attempts = tonumber(redis.call('HGET', job_key, 'attempts'))
-    local max_attempts = tonumber(redis.call('HGET', job_key, 'max_attempts'))
-    if attempts >= max_attempts then
-        redis.call('ZADD', dead_key, now, id)
-        redis.call('HSET', job_key, 'status', 'dead')
-        return 'dead'
-    end
-    -- Exponential backoff: base * 2^(attempts-1), capped. attempts is >= 1 here
-    -- because lease() already counted this attempt.
-    local backoff = math.min(cap, base * 2 ^ (attempts - 1))
-    -- Full jitter: wait a random fraction of the backoff, so jobs that failed
-    -- together don't all retry at the same moment.
-    redis.call('ZADD', pending_key, now + rand * backoff, id)
-    redis.call('HSET', job_key, 'status', 'pending')
-    return 'retry'
+# Shared Lua helper: append a history event. `fields` is a flat list of
+# extra name/value pairs. Expects locals: now, events_key.
+_EMIT = """
+local function emit(event_type, job_id, fields)
+    local args = {'XADD', events_key, '*', 'type', event_type, 'job_id', job_id, 'ts', tostring(now)}
+    for _, v in ipairs(fields) do table.insert(args, v) end
+    redis.call(unpack(args))
 end
 """
 
-# KEYS[1]=pending  ARGV: job_key, job_id, payload_json, delay_seconds, max_attempts
-_ENQUEUE = _NOW + """
+# Shared Lua helper: the failure rule. Callers must already have removed the
+# job from inflight. `rand` is a number in [0, 1) chosen in Python (jitter).
+# Expects locals: now, pending_key, dead_key, base, cap, plus emit().
+_RETRY_OR_DEAD = """
+local function retry_or_dead(job_key, id, rand, event_type, error)
+    local token = redis.call('HGET', job_key, 'lease_token') or ''
+    redis.call('HDEL', job_key, 'lease_token')  -- this lease is over
+    local attempts = tonumber(redis.call('HGET', job_key, 'attempts'))
+    local max_attempts = tonumber(redis.call('HGET', job_key, 'max_attempts'))
+    local outcome
+    if attempts >= max_attempts then
+        redis.call('ZADD', dead_key, now, id)
+        redis.call('HSET', job_key, 'status', 'dead')
+        outcome = 'dead'
+    else
+        -- Exponential backoff: base * 2^(attempts-1), capped. attempts is >= 1
+        -- here because lease() already counted this attempt.
+        local backoff = math.min(cap, base * 2 ^ (attempts - 1))
+        -- Full jitter: wait a random fraction of the backoff, so jobs that
+        -- failed together don't all retry at the same moment.
+        redis.call('ZADD', pending_key, now + rand * backoff, id)
+        redis.call('HSET', job_key, 'status', 'pending')
+        outcome = 'retry'
+    end
+    emit(event_type, id, {'lease_token', token, 'outcome', outcome, 'error', error})
+    return outcome
+end
+"""
+
+# KEYS: pending, events  ARGV: job_key, job_id, payload_json, delay_seconds, max_attempts, queue_name
+_ENQUEUE = _NOW + "local events_key = KEYS[2]\n" + _EMIT + """
 redis.call('HSET', ARGV[1], 'id', ARGV[2], 'payload', ARGV[3], 'status', 'pending',
            'attempts', 0, 'max_attempts', ARGV[5], 'created_at', now)
 redis.call('ZADD', KEYS[1], now + tonumber(ARGV[4]), ARGV[2])
+emit('enqueued', ARGV[2], {'queue', ARGV[6], 'payload', ARGV[3], 'max_attempts', ARGV[5]})
 return 1
 """
 
-# KEYS[1]=pending KEYS[2]=inflight  ARGV: job_prefix, lease_seconds, lease_token
-_LEASE = _NOW + """
+# KEYS: pending, inflight, events  ARGV: job_prefix, lease_seconds, lease_token
+_LEASE = _NOW + "local events_key = KEYS[3]\n" + _EMIT + """
 -- Oldest job whose ready-time has passed (delayed jobs are skipped until then).
 local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, 1)
 if #ids == 0 then return false end
@@ -74,24 +96,27 @@ local job_key = ARGV[1] .. id
 -- Move pending -> inflight. Score is the lease expiry time.
 redis.call('ZREM', KEYS[1], id)
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[2]), id)
-redis.call('HINCRBY', job_key, 'attempts', 1)
+local attempt = redis.call('HINCRBY', job_key, 'attempts', 1)
 -- The token proves which lease is current (see ack).
 redis.call('HSET', job_key, 'status', 'leased', 'lease_token', ARGV[3])
+emit('leased', id, {'lease_token', ARGV[3], 'attempt', tostring(attempt)})
 return id
 """
 
-# KEYS[1]=inflight  ARGV: job_key, job_id, lease_token
-_ACK = """
+# KEYS: inflight, events  ARGV: job_key, job_id, lease_token, result_json
+_ACK = _NOW + "local events_key = KEYS[2]\n" + _EMIT + """
 -- Only the worker holding the current lease may ack. A worker whose lease
 -- already expired (and the job went to someone else) gets rejected.
 if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return 0 end
 redis.call('ZREM', KEYS[1], ARGV[2])
 redis.call('HSET', ARGV[1], 'status', 'done')
 redis.call('HDEL', ARGV[1], 'lease_token')
+emit('acked', ARGV[2], {'lease_token', ARGV[3], 'result', ARGV[4]})
 return 1
 """
 
-# KEYS[1]=inflight  ARGV: job_key, job_id, lease_token, lease_seconds
+# KEYS: inflight  ARGV: job_key, job_id, lease_token, lease_seconds
+# (Heartbeats don't change history, so no event.)
 _EXTEND = _NOW + """
 -- Heartbeat: only the current lease holder may extend.
 if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return 0 end
@@ -101,25 +126,25 @@ redis.call('ZADD', KEYS[1], 'XX', now + tonumber(ARGV[4]), ARGV[2])
 return 1
 """
 
-# KEYS[1]=pending KEYS[2]=inflight KEYS[3]=dead
+# KEYS: pending, inflight, dead, events
 # ARGV: job_key, job_id, lease_token, error, base, cap, rand
 _FAIL = _NOW + """
-local pending_key, dead_key = KEYS[1], KEYS[3]
+local pending_key, dead_key, events_key = KEYS[1], KEYS[3], KEYS[4]
 local base, cap = tonumber(ARGV[5]), tonumber(ARGV[6])
-""" + _RETRY_OR_DEAD + """
+""" + _EMIT + _RETRY_OR_DEAD + """
 -- Same rule as ack: a stale worker can't fail a job it no longer owns.
 if redis.call('HGET', ARGV[1], 'lease_token') ~= ARGV[3] then return false end
 redis.call('ZREM', KEYS[2], ARGV[2])
 redis.call('HSET', ARGV[1], 'last_error', ARGV[4])
-return retry_or_dead(ARGV[1], ARGV[2], tonumber(ARGV[7]))
+return retry_or_dead(ARGV[1], ARGV[2], tonumber(ARGV[7]), 'failed', ARGV[4])
 """
 
-# KEYS[1]=pending KEYS[2]=inflight KEYS[3]=dead
+# KEYS: pending, inflight, dead, events
 # ARGV: job_prefix, batch_size, base, cap, rand_1, rand_2, ... (one per job)
 _REAP = _NOW + """
-local pending_key, dead_key = KEYS[1], KEYS[3]
+local pending_key, dead_key, events_key = KEYS[1], KEYS[3], KEYS[4]
 local base, cap = tonumber(ARGV[3]), tonumber(ARGV[4])
-""" + _RETRY_OR_DEAD + """
+""" + _EMIT + _RETRY_OR_DEAD + """
 -- Leases whose expiry time has passed: the worker is presumed dead.
 -- That counts as a failed attempt, so poison jobs eventually dead-letter.
 local ids = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now, 'LIMIT', 0, tonumber(ARGV[2]))
@@ -127,25 +152,25 @@ for i, id in ipairs(ids) do
     local job_key = ARGV[1] .. id
     redis.call('ZREM', KEYS[2], id)
     redis.call('HSET', job_key, 'last_error', 'lease expired')
-    retry_or_dead(job_key, id, tonumber(ARGV[4 + i]))
+    retry_or_dead(job_key, id, tonumber(ARGV[4 + i]), 'lease_expired', 'lease expired')
 end
 return #ids
 """
 
-
-# KEYS[1]=pending KEYS[2]=dead  ARGV: job_key, job_id
-_REPLAY_ONE = _NOW + """
+# KEYS: pending, dead, events  ARGV: job_key, job_id
+_REPLAY_ONE = _NOW + "local events_key = KEYS[3]\n" + _EMIT + """
 -- ZREM returns 0 if the job isn't dead, so live jobs can't be "replayed".
 if redis.call('ZREM', KEYS[2], ARGV[2]) == 0 then return 0 end
--- Fresh start: full retries again. Past failures will live in PostgreSQL.
+-- Fresh start: full retries again. Past failures are kept in PostgreSQL.
 redis.call('HSET', ARGV[1], 'attempts', 0, 'status', 'pending')
 redis.call('ZADD', KEYS[1], now, ARGV[2])
+emit('replayed', ARGV[2], {})
 return 1
 """
 
-# KEYS[1]=pending KEYS[2]=dead
+# KEYS: pending, dead, events
 # ARGV: job_prefix, error_contains ("" = all), start_index, examine_count, max_replay
-_REPLAY_BATCH = _NOW + """
+_REPLAY_BATCH = _NOW + "local events_key = KEYS[3]\n" + _EMIT + """
 -- Look at a limited slice of the dead set, so this script never runs long.
 -- (Redis runs one script at a time; a long one would stall every worker.)
 local start = tonumber(ARGV[3])
@@ -159,6 +184,7 @@ for _, id in ipairs(ids) do
         redis.call('ZREM', KEYS[2], id)
         redis.call('HSET', job_key, 'attempts', 0, 'status', 'pending')
         redis.call('ZADD', KEYS[1], now, id)
+        emit('replayed', id, {})
         replayed = replayed + 1
     else
         skipped = skipped + 1
@@ -181,9 +207,11 @@ class Queue:
         jitter: Callable[[], float] = random.random,  # tests can pass a fixed value
     ):
         self.r = client
+        self.name = name
         self.pending_key = f"tq:{name}:pending"
         self.inflight_key = f"tq:{name}:inflight"
         self.dead_key = f"tq:{name}:dead"
+        self.events_key = f"tq:{name}:events"
         self.retry_base = retry_base_seconds
         self.retry_cap = retry_cap_seconds
         self.jitter = jitter
@@ -204,8 +232,9 @@ class Queue:
         """
         job_id = str(uuid.uuid4())
         self._enqueue(
-            keys=[self.pending_key],
-            args=[JOB_PREFIX + job_id, job_id, json.dumps(payload), delay_seconds, max_attempts],
+            keys=[self.pending_key, self.events_key],
+            args=[JOB_PREFIX + job_id, job_id, json.dumps(payload), delay_seconds,
+                  max_attempts, self.name],
         )
         return job_id
 
@@ -217,18 +246,19 @@ class Queue:
         """
         token = str(uuid.uuid4())
         job_id = self._lease(
-            keys=[self.pending_key, self.inflight_key],
+            keys=[self.pending_key, self.inflight_key, self.events_key],
             args=[JOB_PREFIX, lease_seconds, token],
         )
         if job_id is None:
             return None
         return job_id.decode(), token
 
-    def ack(self, job_id: str, lease_token: str) -> bool:
+    def ack(self, job_id: str, lease_token: str, result: Any = None) -> bool:
         """Mark a job done. Returns False if this lease is no longer valid."""
         ok = self._ack(
-            keys=[self.inflight_key],
-            args=[JOB_PREFIX + job_id, job_id, lease_token],
+            keys=[self.inflight_key, self.events_key],
+            # default=str: results that aren't plain JSON are stored as text.
+            args=[JOB_PREFIX + job_id, job_id, lease_token, json.dumps(result, default=str)],
         )
         return ok == 1
 
@@ -250,7 +280,7 @@ class Queue:
         dead-letter set), or None if this lease is no longer valid.
         """
         result = self._fail(
-            keys=[self.pending_key, self.inflight_key, self.dead_key],
+            keys=[self.pending_key, self.inflight_key, self.dead_key, self.events_key],
             args=[JOB_PREFIX + job_id, job_id, lease_token, error,
                   self.retry_base, self.retry_cap, self.jitter()],
         )
@@ -264,7 +294,7 @@ class Queue:
         # One random jitter value per job the script might process.
         rands = [self.jitter() for _ in range(batch_size)]
         return self._reap(
-            keys=[self.pending_key, self.inflight_key, self.dead_key],
+            keys=[self.pending_key, self.inflight_key, self.dead_key, self.events_key],
             args=[JOB_PREFIX, batch_size, self.retry_base, self.retry_cap, *rands],
         )
 
@@ -274,7 +304,7 @@ class Queue:
         Returns False if the job isn't in the dead-letter set.
         """
         ok = self._replay_one(
-            keys=[self.pending_key, self.dead_key],
+            keys=[self.pending_key, self.dead_key, self.events_key],
             args=[JOB_PREFIX + job_id, job_id],
         )
         return ok == 1
@@ -292,7 +322,7 @@ class Queue:
         while limit is None or total < limit:
             remaining = limit - total if limit is not None else batch_size
             replayed, start, done = self._replay_batch(
-                keys=[self.pending_key, self.dead_key],
+                keys=[self.pending_key, self.dead_key, self.events_key],
                 args=[JOB_PREFIX, error_contains, start, batch_size, remaining],
             )
             total += replayed

@@ -74,8 +74,9 @@ class Worker:
         heartbeat.start()
 
         error = None
+        result = None
         try:
-            self._run_task(job["payload"])
+            result = self._run_task(job["payload"])
         except Exception as e:  # any error in the task counts as a failed attempt
             error = f"{type(e).__name__}: {e}"
         finally:
@@ -84,7 +85,7 @@ class Worker:
             heartbeat.join()
 
         if error is None:
-            if self.queue.ack(job_id, token):
+            if self.queue.ack(job_id, token, result):
                 log.info("job %s done", job_id)
             else:
                 log.warning("job %s: lease was lost before ack (another worker owns it)", job_id)
@@ -93,11 +94,11 @@ class Worker:
             log.warning("job %s failed (%s): %s", job_id, outcome or "lease lost", error)
         return True
 
-    def _run_task(self, payload: dict) -> None:
+    def _run_task(self, payload: dict):
         name = payload.get("task")
         if name not in self.tasks:
             raise ValueError(f"unknown task: {name!r}")
-        self.tasks[name](**payload.get("args", {}))
+        return self.tasks[name](**payload.get("args", {}))
 
     def _heartbeat(self, job_id: str, token: str, stop: threading.Event) -> None:
         # stop.wait() returns True as soon as stop is set, so this exits promptly.
