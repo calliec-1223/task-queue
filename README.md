@@ -96,7 +96,7 @@ Settings (environment variables): `REDIS_URL`, `QUEUE_NAME`, `LEASE_SECONDS`.
 
 ## Benchmarks
 
-All numbers below come from real runs ([raw results](bench/results/)), measured before priority was added (which changed how jobs are leased), on an Apple M2 MacBook (8 cores), with every service running in Docker Compose. Workers run 20 ms jobs (`sleep`), standing in for I/O-bound work like an API call.
+All numbers below come from real runs ([raw results](bench/results/)) of the current code on an Apple M2 MacBook (8 cores), with every service running in Docker Compose. Workers run 20 ms jobs (`sleep`), standing in for I/O-bound work like an API call.
 
 ### Throughput scales almost linearly with workers
 
@@ -104,15 +104,15 @@ All numbers below come from real runs ([raw results](bench/results/)), measured 
 
 | Workers | Jobs/sec | Ideal | Efficiency |
 |---|---|---|---|
-| 1 | 39 | 50 | 78% |
-| 2 | 84 | 100 | 84% |
-| 4 | 172 | 200 | 86% |
-| 8 | 327 | 400 | 82% |
-| 16 | 642 | 800 | 80% |
+| 1 | 38 | 50 | 76% |
+| 2 | 81 | 100 | 81% |
+| 4 | 176 | 200 | 88% |
+| 8 | 331 | 400 | 83% |
+| 16 | 667 | 800 | 83% |
 
-"Ideal" is workers ÷ 20 ms, assuming zero queue overhead. Efficiency stays around 80% from 1 to 16 workers, so the queue itself isn't the bottleneck at this scale. The gap is most likely fixed per-job overhead in the worker (several Redis round trips per job: lease, read the job, ack; plus starting a heartbeat thread), not yet profiled.
+"Ideal" is workers ÷ 20 ms, assuming zero queue overhead. Efficiency stays around 80% from 1 to 16 workers, so the queue itself isn't the bottleneck at this scale. The gap is most likely fixed per-job overhead in the worker (several Redis round trips per job: lease, read the job, checkpoint, ack; plus starting a heartbeat thread), not yet profiled.
 
-### Latency: adaptive polling gets fast pickup without the idle cost
+### Latency: adaptive polling vs. fixed intervals
 
 ![Latency chart](docs/bench-latency.png)
 
@@ -120,26 +120,26 @@ Jobs arrive at a steady 100/sec for 20 seconds. Latency is enqueue → done, tim
 
 | Workers | Poll every 500 ms | Poll every 50 ms | Adaptive (default) |
 |---|---|---|---|
-| 1 | 12,996 / 28,060 ms | 11,922 / 26,830 ms | 12,109 / 27,006 ms |
-| 2 | 1,188 / 2,166 ms | 900 / 1,919 ms | 810 / 1,616 ms |
-| 4 | 41 / 253 ms | 26 / 38 ms | 26 / 50 ms |
-| 8 | 36 / 112 ms | 24 / 39 ms | 25 / 62 ms |
-| 16 | 41 / 203 ms | 24 / 31 ms | 24 / 33 ms |
+| 1 | 12,815 / 28,178 ms | 12,347 / 27,738 ms | 12,820 / 28,277 ms |
+| 2 | 1,313 / 2,540 ms | 984 / 2,050 ms | 1,272 / 2,358 ms |
+| 4 | 46 / 161 ms | 26 / 38 ms | 26 / 155 ms |
+| 8 | 45 / 212 ms | 25 / 33 ms | 26 / 64 ms |
+| 16 | 36 / 186 ms | 24 / 43 ms | 25 / 55 ms |
 
-Workers can't be notified of new jobs (sorted sets have no blocking pop, [DECISIONS.md](DECISIONS.md) #2), so idle workers poll. A job that arrives while a worker is waiting sits ready until the worker checks again, which is why a fixed 500 ms interval shows up in p99.
+Workers can't be notified of new jobs (sorted sets have no blocking pop, [DECISIONS.md](DECISIONS.md) #2), so idle workers poll. A job that arrives while a worker is waiting sits ready until the worker checks again.
 
 Faster polling costs Redis work while workers are idle. Measured with 16 idle workers:
 
 | Polling mode | Redis commands/sec (idle) |
 |---|---|
-| Every 500 ms | 144 |
-| Every 50 ms | 952 |
-| **Adaptive** | **146** |
+| Every 500 ms | 225 |
+| Every 50 ms | 1,566 |
+| **Adaptive** | **228** |
 
-**Adaptive polling** (the default) waits 10 ms after the queue goes empty and doubles the wait after each empty check, up to 500 ms. Finding a job resets it. That gives roughly the latency of 50 ms polling at the idle cost of 500 ms polling. (Counts include the commands each Lua script runs inside Redis.)
+**Adaptive polling** (the default) waits 10 ms after the queue goes empty and doubles the wait after each empty check, up to 500 ms; finding a job resets it. It costs the same idle load as 500 ms polling, about 7× less than 50 ms polling. Its p50 matches 50 ms polling, but its p99 is less consistent: 155 ms at 4 workers in this run (50 ms in an earlier run), because at moderate load a worker can be mid-backoff when work arrives. Counts include the commands each Lua script runs inside Redis.
 
 - 1–2 workers can't keep up with 100 jobs/sec, so the backlog grows and latency is measured in seconds in every mode.
-- p99 varies between runs: in an earlier run, 500 ms polling at 16 workers measured 71 ms instead of 203 ms. Compare modes within the same run.
+- p99 varies between runs, so compare modes within the same run.
 
 ### Zero job loss while workers are killed
 
@@ -147,11 +147,11 @@ Faster polling costs Redis work while workers are idle. Measured with 16 idle wo
 
 | Jobs submitted | Completed | Lost | Worker kills | History writer kills | Jobs interrupted mid-run | Recorded done twice |
 |---|---|---|---|---|---|---|
-| 1,000 | 1,000 | **0** | 20 | 5 | 11 | 0 |
+| 1,000 | 1,000 | **0** | 20 | 5 | 13 | 0 |
 
-Interrupted jobs were recovered by lease expiry and finished on a later attempt. Some kills hit idle workers, which is why there are fewer interrupted jobs than kills. Every job also appears exactly once in PostgreSQL history, despite the history writer being killed 5 times.
+Interrupted jobs were recovered by lease expiry and finished on a later attempt. Some kills hit idle workers, which is why there are fewer interrupted jobs than kills. Every job appears exactly once in PostgreSQL history, despite the history writer being killed 5 times.
 
-Reproduce: `docker compose up -d --build`, then `python -m bench.benchmark`, `python -m bench.chaos`, and `python -m bench.plot`.
+Reproduce: `docker compose up -d --build`, then `python -m bench.benchmark`, `python -m bench.idle_load`, `python -m bench.chaos`, and `python -m bench.plot`.
 
 ## Real-world use: Whisk's AI baking assistant
 

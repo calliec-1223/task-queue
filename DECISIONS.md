@@ -114,6 +114,7 @@ Each entry records a choice, the alternatives considered, and why.
   - *Fixed 100 ms*: a middle ground that's still a fixed tradeoff.
 - **Why**: Measured, it gets most of 50 ms polling's latency (p99 33–62 ms) at 500 ms polling's idle cost (146 vs 144 commands/sec). It's the same exponential backoff idea as job retries (#5).
 - **Revisited after benchmarking**: Fixed 50 ms had the best p99 by up to about 25 ms, and at 16 workers its idle cost (about 950 commands/sec) is under 1% of Redis's capacity. I kept adaptive anyway: the idle cost of fixed polling grows with every worker (about 60,000 commands/sec at 1,000 idle workers), and the real jobs in Phase 4 (Claude API calls) take seconds, so 25 ms is about 1% of a job.
+- **Re-measured after priority (#18)**: p99 at 4–16 workers was 155, 64 and 55 ms (fixed 50 ms: 38, 33, 43 ms), so adaptive's p99 is less consistent than the first run suggested. Idle load stayed equal to 500 ms polling (228 vs 225 commands/sec; fixed 50 ms: 1566). Every empty check now costs more Redis commands because of the priority step, but the ratio between modes held.
 - **Tradeoffs accepted**: Slightly worse p99 than fixed 50 ms right after an idle stretch, because a backed-off worker can be mid-wait (up to 500 ms) when work arrives. Still no true push notification, which is the cost of choosing sorted sets in #2.
 
 ## 14. Phase 4: Whisk uses task-queue as a library

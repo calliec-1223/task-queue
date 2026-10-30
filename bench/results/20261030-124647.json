@@ -1,0 +1,199 @@
+{
+  "started_at": "2026-10-30T19:37:25.297855+00:00",
+  "machine": {
+    "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+    "cpus": 8
+  },
+  "task_seconds": 0.02,
+  "throughput": [
+    {
+      "workers": 1,
+      "jobs": 1000,
+      "seconds": 26.1684,
+      "jobs_per_second": 38.214029134375814,
+      "ideal_jobs_per_second": 50.0
+    },
+    {
+      "workers": 2,
+      "jobs": 1000,
+      "seconds": 12.322,
+      "jobs_per_second": 81.1556565492615,
+      "ideal_jobs_per_second": 100.0
+    },
+    {
+      "workers": 4,
+      "jobs": 1000,
+      "seconds": 5.6658,
+      "jobs_per_second": 176.49758198312682,
+      "ideal_jobs_per_second": 200.0
+    },
+    {
+      "workers": 8,
+      "jobs": 1000,
+      "seconds": 3.0221,
+      "jobs_per_second": 330.895734753979,
+      "ideal_jobs_per_second": 400.0
+    },
+    {
+      "workers": 16,
+      "jobs": 1000,
+      "seconds": 1.4982,
+      "jobs_per_second": 667.4676278200508,
+      "ideal_jobs_per_second": 800.0
+    }
+  ],
+  "latency": [
+    {
+      "workers": 1,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12815.25,
+      "p99_ms": 28177.967,
+      "max_ms": 28509.9
+    },
+    {
+      "workers": 2,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 1312.6,
+      "p99_ms": 2540.005,
+      "max_ms": 2571.4
+    },
+    {
+      "workers": 4,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 45.55,
+      "p99_ms": 160.908,
+      "max_ms": 206.6
+    },
+    {
+      "workers": 8,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 45.1,
+      "p99_ms": 211.509,
+      "max_ms": 246.5
+    },
+    {
+      "workers": 16,
+      "poll_mode": "fixed-500ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 36.3,
+      "p99_ms": 186.17299999999986,
+      "max_ms": 283.9
+    },
+    {
+      "workers": 1,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12346.55,
+      "p99_ms": 27737.724,
+      "max_ms": 28048.2
+    },
+    {
+      "workers": 2,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 984.05,
+      "p99_ms": 2050.3050000000003,
+      "max_ms": 2095.9
+    },
+    {
+      "workers": 4,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 26.4,
+      "p99_ms": 38.312999999999974,
+      "max_ms": 70.3
+    },
+    {
+      "workers": 8,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 24.8,
+      "p99_ms": 32.701,
+      "max_ms": 44.9
+    },
+    {
+      "workers": 16,
+      "poll_mode": "fixed-50ms",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 24.0,
+      "p99_ms": 43.30899999999998,
+      "max_ms": 167.9
+    },
+    {
+      "workers": 1,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 12820.2,
+      "p99_ms": 28276.866,
+      "max_ms": 28588.6
+    },
+    {
+      "workers": 2,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 1272.25,
+      "p99_ms": 2358.1099999999997,
+      "max_ms": 2393.1
+    },
+    {
+      "workers": 4,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 26.4,
+      "p99_ms": 155.20399999999998,
+      "max_ms": 173.1
+    },
+    {
+      "workers": 8,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 25.6,
+      "p99_ms": 64.10499999999999,
+      "max_ms": 95.0
+    },
+    {
+      "workers": 16,
+      "poll_mode": "adaptive",
+      "rate": 100,
+      "jobs": 2000,
+      "p50_ms": 25.0,
+      "p99_ms": 54.50699999999999,
+      "max_ms": 157.2
+    }
+  ],
+  "idle_load": [
+    {
+      "poll_mode": "fixed-500ms",
+      "idle_workers": 16,
+      "redis_requests_per_second": 224.6
+    },
+    {
+      "poll_mode": "fixed-50ms",
+      "idle_workers": 16,
+      "redis_requests_per_second": 1566.5
+    },
+    {
+      "poll_mode": "adaptive",
+      "idle_workers": 16,
+      "redis_requests_per_second": 227.8
+    }
+  ]
+}
