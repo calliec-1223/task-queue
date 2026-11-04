@@ -1,259 +1,315 @@
 # Design Decisions
 
-Each entry records a choice, the alternatives considered, and why.
+Every real choice I made while building this, with what I considered and why I picked what I did. Each entry starts with a one-sentence version; the details follow.
 
-## 1. Run Redis in Docker from Phase 1
+**Later decisions change earlier ones in three places:** #18 split the single `pending` set from #2 into `delayed` + `ready`; #25 enforces the "one history writer" rule from #11; #27 replaced polling (#2, #13) with a doorbell.
 
-- **Decision**: Use Docker Desktop to run Redis locally starting in Phase 1.
-- **Alternatives**: Install Redis directly with Homebrew and add Docker in Phase 2.
-- **Why**: Every developer (and CI) gets the same Redis version with one command, and the Phase 2 Docker Compose setup builds on it instead of replacing a local install.
+## 1. Run Redis in Docker from day one
 
-## 2. Store the queue in Redis sorted sets, with Lua scripts for atomic moves
+**In short:** Docker gives everyone, including CI, the same Redis with one command.
 
-- **Decision**: Two sorted sets. In `pending`, a job's score is the time it becomes ready to be picked up. In `inflight` (a worker is working on it), the score is the time the worker's lease expires.
+- **Decision**: Run Redis in Docker from Phase 1.
+- **Alternatives**: Install Redis with Homebrew now, switch to Docker in Phase 2.
+- **Why**: The Phase 2 Docker Compose setup builds on it instead of replacing it, and nobody's laptop setup can differ from CI's.
+
+## 2. The queue is Redis sorted sets, changed only by Lua scripts
+
+**In short:** Every score is "the time something should happen to this job," and Lua scripts make each move all-or-nothing.
+
+- **Decision**: Jobs live in sorted sets. Waiting jobs are scored by when they become ready; running jobs (`inflight`) are scored by when their lease expires. Every move between sets is one Lua script.
 - **Alternatives**:
-  - *Two Lists*: Lists don't track time, so handling expired leases, delays and retry backoff would need extra structures.
-  - *Redis Streams*: Redis implements the lease and recovery logic for me, so there's less of my own design to explain, and it still doesn't support delayed jobs.
-- **Why**: Every score answers "at what time should something happen to this job?", so delays, retry backoff and lease expiry all use the same mechanism. Moves between the sets run as Lua scripts because they're atomic: all steps run or none do, and Redis runs one script at a time. That stops two workers from grabbing the same job, and stops a crash from leaving a job in neither set, where it would be lost.
-- **Tradeoffs accepted**: I had to learn Lua, and workers have to poll for jobs instead of waiting for one to arrive.
+  - *Two lists*: lists don't know about time, so delays, retry backoff and lease expiry would each need something extra.
+  - *Redis Streams*: Redis would handle leases and recovery for me, which leaves less of my own design to explain, and Streams still can't delay a job.
+- **Why**: One idea (score = time) covers delays, backoff and lease expiry. Redis runs one script at a time and a script either fully runs or doesn't, so two workers can never grab the same job, and a crash can't leave a job in neither set.
+- **Tradeoffs**: I had to learn Lua. Originally, idle workers had to poll for work; #27 fixed that with a doorbell.
 
-## 3. Heartbeats reset the lease expiry to "now + N"
+## 3. A heartbeat resets the lease to "now + N seconds"
 
-- **Decision**: While a worker runs a job, it calls `extend_lease`, which sets the job's inflight score to now + N seconds. Only the holder of the current lease token can extend.
+**In short:** A crashed worker is always noticed within N seconds of its last heartbeat.
+
+- **Decision**: While a job runs, the worker's heartbeat sets the job's lease expiry to now + N. Only the worker holding the current lease token can do this.
 - **Alternatives**:
-  - *Separate heartbeat key with a TTL*: Redis deletes it automatically, but job state ends up split across two places and the inflight score stops meaning anything.
-  - *Add N to the current expiry*: even a healthy worker's expiry keeps drifting further out, so crashes are detected more slowly the longer a job runs, and it needs an extra cap to stay bounded.
-- **Why**: It reuses the "score = time" mechanism with no new structures, and a crash is always detected within N seconds of the last heartbeat.
-- **Tradeoffs accepted**: Each heartbeat is a round trip to Redis, which adds load with many workers.
+  - *A separate heartbeat key that expires on its own*: Redis cleans it up for me, but the job's state is split across two places and the inflight score stops meaning anything.
+  - *Add N to the current expiry*: a healthy job's expiry drifts further and further out, so crashes are noticed later the longer a job runs.
+- **Why**: Same "score = time" idea, no new structures, and a fixed worst-case detection time.
+- **Tradeoffs**: Each heartbeat is a Redis round trip, so more workers means more load.
 
-## 4. Errors and lease expiries both count as failed attempts
+## 4. A crash and an error both count as a failed attempt
 
-- **Decision**: One rule for every failure. When a worker reports an error (`fail`) or its lease expires (`reap_expired`): if `attempts` < `max_attempts`, retry with backoff; otherwise move the job to the dead-letter set.
+**In short:** One retry rule for every kind of failure, so a job that crashes every worker can't loop forever.
+
+- **Decision**: Whether the worker reports an error or its lease just expires, the job uses up an attempt. Attempts left: retry with backoff. None left: dead-letter queue.
 - **Alternatives**:
-  - *Only reported errors count*: simpler, but a poison job that crashes every worker would be requeued forever.
-  - *Separate limits for errors and crashes*: more precise, but two counters and two settings for little gain right now.
-- **Why**: It handles every kind of failure, including poison jobs, with one rule.
-- **Tradeoffs accepted**: A healthy job can be dead-lettered if its workers keep getting killed for unrelated reasons. In Phase 3's kill-workers test, `max_attempts` must be set high enough for that not to happen.
+  - *Only reported errors count*: a "poison" job that crashes every worker would be retried forever.
+  - *Separate limits for errors and crashes*: more precise, but two counters and two settings for little gain.
+- **Why**: One rule handles everything, including poison jobs.
+- **Tradeoffs**: A healthy job can be dead-lettered if its workers keep getting killed for unrelated reasons. The chaos test sets `max_attempts` high enough to avoid that.
 
 ## 5. Exponential backoff with full jitter
 
-- **Decision**: Retry delay = random(0, 1) × min(cap, base × 2^(attempts−1)). Defaults: base 1s, cap 300s.
-- **Alternatives**: *Plain exponential backoff*: predictable, but jobs that fail together retry together.
-- **Why**: Plain backoff doesn't work at production scale. If an outage fails 1,000 jobs at once, they all retry at the same instant and overload the recovering service again (the "thundering herd"). Jitter spreads the retries out.
-- **Tradeoffs accepted**: Retry times are random, so tests either pin the jitter to a fixed value or check a range.
-- **Note**: The random number is chosen in Python and passed into the Lua script, because Redis's Lua `math.random` may not be truly random across calls.
+**In short:** Retries wait longer each time, with a random spread so jobs that failed together don't all retry together.
 
-## 6. Dead-letter jobs go in a sorted set scored by time of death
+- **Decision**: Delay = random(0..1) × min(300 s, 1 s × 2^(attempt − 1)).
+- **Alternatives**: *Plain exponential backoff*: predictable, but if an outage fails 1,000 jobs at once, they all retry at the same moment and knock the recovering service over again (the "thundering herd").
+- **Why**: Jitter spreads retries out, which matters most exactly when something is already struggling.
+- **Tradeoffs**: Retry times are random, so tests pin the random value or check a range.
+- **Detail**: Python picks the random number and passes it into the Lua script, because Lua's `math.random` inside Redis may not really be random between calls.
+
+## 6. Dead jobs go in a sorted set scored by time of death
+
+**In short:** Same "score = time" idea: oldest failures first, and replay is easy.
 
 - **Decision**: `tq:<queue>:dead`, with the last error saved on the job.
-- **Why**: Keeps the "score = time" idea, lists the oldest failures first, and makes a later "replay this job" function easy.
 
-## 7. Dead-letter replay: single job, plus batched bulk replay by error
+## 7. Replay one dead job, or all of them that failed for the same reason
 
-- **Decision**: `replay(job_id)` for one job, and `replay_dead(error_contains=...)` to replay every dead job whose last error matches, in batches.
-- **Alternatives**: *Single job only*: simpler, but after an outage someone would have to replay hundreds of jobs by hand.
-- **Why**: After an outage is fixed, one command replays every job that failed for that reason, which saves operator time.
-- **Tradeoffs accepted**: Redis runs one command or script at a time, so a script that looped over thousands of jobs would stall every worker, including their heartbeats, which could expire healthy leases. Each script call therefore examines at most `batch_size` jobs, and Python loops between calls so other clients get a turn. It's more code than single-job replay.
+**In short:** After an outage is fixed, one command replays every job it killed, in small batches so Redis never freezes.
 
-## 8. Replay resets `attempts` to 0
+- **Decision**: `replay(job_id)` for one job; `replay_dead(error_contains=...)` for every dead job whose last error matches.
+- **Alternatives**: *One job at a time only*: simpler, but someone would replay hundreds of jobs by hand after an outage.
+- **Why**: It saves the person on call a lot of time.
+- **Tradeoffs**: Redis runs one script at a time. A script that looped over thousands of jobs would block every worker, including their heartbeats, so healthy leases could expire. Each call handles at most `batch_size` jobs, and Python loops between calls so other clients get a turn.
 
-- **Decision**: A replayed job starts over with a full set of retries.
-- **Alternatives**: *Keep `attempts` and raise `max_attempts`*: keeps an honest total count, but the meaning of `max_attempts` drifts and there are two numbers to explain.
-- **Why**: Redis only needs the current attempt count to decide retry vs. dead-letter. The full failure history will live in PostgreSQL (Phase 2) for debugging.
+## 8. A replayed job starts with a full set of retries
 
-## 9. Redis persistence: append-only file (AOF), synced every second
+**In short:** Redis only needs the current count; PostgreSQL keeps the full history.
 
-- **Decision**: Run Redis with `--appendonly yes`. Redis logs every write to disk and replays the log on restart. The default sync is once per second.
+- **Decision**: Replay resets `attempts` to 0.
+- **Alternatives**: *Keep the count and raise `max_attempts`*: keeps an honest total, but now there are two numbers whose meaning drifts.
+- **Why**: Redis only uses the count to decide "retry or dead-letter." Every attempt, including ones before the replay, is kept in PostgreSQL (#10).
+
+## 9. Redis saves every write to an append-only file, synced once a second
+
+**In short:** A Redis restart keeps the queue; the worst case is losing about one second of writes if the whole machine crashes.
+
+- **Decision**: `--appendonly yes`. Redis logs each write and replays the log on restart.
 - **Alternatives**:
-  - *No persistence*: fastest, but a Redis restart loses every queued job.
-  - *Snapshots only (RDB)*: periodic full copies, so a crash can lose minutes of jobs.
-  - *AOF synced on every write*: loses nothing, but much slower.
-- **Why**: A queue that loses jobs on restart breaks the "zero job loss" goal. Syncing every second keeps writes fast.
-- **Tradeoffs accepted**: If the machine itself crashes, up to about 1 second of writes can be lost.
+  - *No persistence*: fastest, but a restart loses every job.
+  - *Periodic snapshots only*: a crash can lose minutes of jobs.
+  - *Sync to disk on every write*: loses nothing, but much slower.
+- **Why**: Losing jobs on restart would break the "zero job loss" goal, and syncing once a second keeps writes fast.
+- **Tradeoffs**: Up to about 1 second of writes can be lost if the machine dies. Jobs and their history events are lost together, so they never disagree.
 
-## 10. PostgreSQL schema: `jobs` (current state) + `job_attempts` (one row per attempt)
+## 10. PostgreSQL: a `jobs` table plus a `job_attempts` table
 
-- **Decision**: `jobs` has one row per job, updated as it changes. `job_attempts` has one row per attempt that is never overwritten, keyed by the attempt's lease token.
+**In short:** One row per job for its current state, and one row per attempt that's never overwritten.
+
+- **Decision**: `jobs` holds each job's current state. `job_attempts` gets a new row per attempt, keyed by that attempt's lease token.
 - **Alternatives**:
-  - *One `jobs` table only*: simplest, but each update overwrites the last, so the attempt history is lost. That would break decision #8 (replay resets `attempts` because PostgreSQL keeps the history).
-  - *Append-only `job_events` log*: a complete audit trail, but the table grows fastest, and a job's current status has to be worked out from its latest event instead of read from a column.
-- **Why**: Current status is a simple lookup, and every attempt is kept, even across replays.
-- **Detail**: The lease token is the attempt's primary key. After a replay, Redis restarts attempt numbers at 1, so "job X, attempt 1" can happen twice; tokens never repeat. It also means the same attempt can't be recorded twice.
-- **Tradeoffs accepted**: Two writes per attempt, and a join to see a job together with its history.
+  - *Only a `jobs` table*: simplest, but each update overwrites the last, so attempt history is lost, which #8 depends on.
+  - *An append-only log of every event*: a complete audit trail, but it grows fastest, and "what's this job's status?" means finding its latest event.
+- **Why**: Current status is a simple lookup, and every attempt survives, even across replays.
+- **Detail**: Lease tokens are the attempt's ID because attempt numbers restart at 1 after a replay ("job X, attempt 1" can happen twice), while tokens never repeat. That also stops the same attempt from being recorded twice.
+- **Tradeoffs**: Two writes per attempt, and a join to see a job with its history.
 
-## 11. History reaches PostgreSQL through an event stream in Redis (outbox pattern)
+## 11. History goes through an event stream in Redis (the outbox pattern)
 
-- **Decision**: Every Lua script that changes a job also appends an event to a Redis Stream (`tq:<queue>:events`) in the same atomic step. A separate history writer reads the stream through a consumer group, writes each batch to PostgreSQL in one transaction, and only then confirms the events (`XACK`) and deletes them.
+**In short:** A job change and its history event are written in the same atomic step, so history can never miss a change.
+
+- **Decision**: Every Lua script that changes a job also appends an event to a Redis Stream. A separate history writer copies events into PostgreSQL, and only confirms (`XACK`) and deletes them after the PostgreSQL commit.
 - **Alternatives**:
-  - *Workers write to PostgreSQL right after each Redis step*: simple and instant, but a crash between the two writes loses that history forever, and a slow PostgreSQL slows every job.
-  - *Periodic sync of Redis state into PostgreSQL*: workers don't change, but anything that happens between syncs (like a failed attempt) is never recorded.
-- **Why**: The others can lose history. Here a change and its event happen together or not at all, so history can't miss a change Redis has saved.
-- **How duplicates are handled**: Events are confirmed after the commit, so a writer crash can cause redelivery (at-least-once). Every write is idempotent (`ON CONFLICT DO NOTHING`, or updates that set the same values), so applying an event twice is harmless.
-- **Tradeoffs accepted**: One more process to run. History lags slightly. If the writer is down, events pile up in Redis memory. Exactly one writer per queue, so events for a job are applied in order. Redis's ~1 second disk-sync window (#9) still applies, but state and events are lost together, so they never disagree.
-- **Why Streams here but not for the queue (#2)**: Here Redis only needs to be a reliable ordered log with redelivery, which is exactly what Streams provide. For the queue I wanted to design lease and retry logic myself, and Streams don't support delayed jobs.
+  - *Workers write to PostgreSQL right after Redis*: simple, but a crash between the two writes loses that history forever, and a slow PostgreSQL slows every job.
+  - *Copy Redis state into PostgreSQL every so often*: workers don't change, but anything between copies (like a failed attempt) is never recorded.
+- **Why**: Both alternatives can lose history; this can't.
+- **Duplicates**: A writer that crashes after committing but before confirming gets the same events again. Every write is idempotent (applying it twice gives the same result as once), so that's harmless.
+- **Tradeoffs**: One more process. History lags slightly. If the writer is down, events pile up in Redis memory. Only one writer may write at a time, so a job's events stay in order (#25 enforces this).
+- **Why Streams here but not for the queue (#2)**: Here I only need a reliable, ordered log with redelivery, which is exactly what Streams are. For the queue I wanted to design leases and retries myself, and Streams can't delay jobs.
 
-## 12. Poison history events: retry N times, then move to `dead_events`
+## 12. A bad history event is retried 3 times, then set aside
 
-- **Decision**: If one event fails to apply because of its own data, its batch is rolled back and retried. After 3 failures, the event is saved to a `dead_events` table and the batch continues without it.
+**In short:** A one-off glitch gets another chance, a truly broken event can't block history, and nothing is thrown away.
+
+- **Decision**: If one event fails because of its own data, the batch is rolled back and retried. After 3 failures, the event is saved to a `dead_events` table and the batch goes on without it.
 - **Alternatives**:
-  - *Dead-letter on the first failure*: simplest, but a one-off glitch would send a good event to `dead_events` and need manual work.
-  - *Log and skip*: almost no code, but the event would be lost from history, breaking #11's promise.
-- **Why**: Brief glitches get another chance, history never stays blocked behind a bad event, and nothing is thrown away. Only events that fail every time need a person.
+  - *Set it aside on the first failure*: a brief glitch would push a good event aside and need manual work.
+  - *Log it and skip it*: the event is lost, breaking #11's promise.
+- **Why**: Only events that fail every time need a person.
 - **Details**:
-  - Each event is applied inside a savepoint, so a failing event's writes are undone without losing the rest of the batch.
-  - Failures are counted in a separate Redis hash, not with Redis's built-in delivery count, because that also rises during PostgreSQL outages and would dead-letter good events after a long outage.
-  - Connection errors (PostgreSQL down) never count as event failures.
-- **Tradeoffs accepted**: A poison event holds up history for N retry rounds (about N seconds) before it's set aside. Each retry re-applies the good events in its batch, which is safe because the writes are idempotent.
+  - Each event runs inside a savepoint, so a failing event is undone without undoing the rest of the batch.
+  - I count failures myself instead of using Redis's delivery count, because that also rises during a PostgreSQL outage and would push good events aside.
+  - Connection errors (PostgreSQL down) never count as an event's fault.
+- **Tradeoffs**: A bad event holds history up for about 3 seconds before it's set aside.
 
-## 13. Adaptive polling for idle workers
+## 13. Adaptive polling for idle workers (replaced by #27)
 
-- **Decision**: When the queue is empty, a worker waits 10 ms, then doubles the wait after each empty check, up to 500 ms. Finding a job resets the wait to 10 ms.
+**In short:** Check often right after work, back off when idle: most of fast polling's speed at slow polling's cost.
+
+- **Decision**: An idle worker waits 10 ms, doubling after each empty check up to 500 ms; finding a job resets it to 10 ms.
 - **Alternatives**:
-  - *Fixed 500 ms*: least Redis load, but a job arriving at an idle worker can wait up to 500 ms. Measured p99: 111–253 ms with 4–16 workers.
-  - *Fixed 50 ms*: p99 of 31–39 ms, but 952 Redis commands/sec from 16 idle workers, 6.6× more.
-  - *Fixed 100 ms*: a middle ground that's still a fixed tradeoff.
-- **Why**: Measured, it gets most of 50 ms polling's latency (p99 33–62 ms) at 500 ms polling's idle cost (146 vs 144 commands/sec). It's the same exponential backoff idea as job retries (#5).
-- **Revisited after benchmarking**: Fixed 50 ms had the best p99 by up to about 25 ms, and at 16 workers its idle cost (about 950 commands/sec) is under 1% of Redis's capacity. I kept adaptive anyway: the idle cost of fixed polling grows with every worker (about 60,000 commands/sec at 1,000 idle workers), and the real jobs in Phase 4 (Claude API calls) take seconds, so 25 ms is about 1% of a job.
-- **Re-measured after priority (#18)**: p99 at 4–16 workers was 155, 64 and 55 ms (fixed 50 ms: 38, 33, 43 ms), so adaptive's p99 is less consistent than the first run suggested. Idle load stayed equal to 500 ms polling (228 vs 225 commands/sec; fixed 50 ms: 1566). Every empty check now costs more Redis commands because of the priority step, but the ratio between modes held.
-- **Tradeoffs accepted**: Slightly worse p99 than fixed 50 ms right after an idle stretch, because a backed-off worker can be mid-wait (up to 500 ms) when work arrives. Still no true push notification, which is the cost of choosing sorted sets in #2.
+  - *Fixed 500 ms*: least load, but a new job can wait up to 500 ms (p99 111–253 ms).
+  - *Fixed 50 ms*: p99 31–39 ms, but 16 idle workers sent 952 commands/sec, 6.6× more.
+- **Why**: First measurement: p99 33–62 ms at the same idle cost as 500 ms polling. Same backoff idea as retries (#5).
+- **What re-measuring showed**: Fixed 50 ms was more consistent (p99 33–43 ms vs adaptive's 55–155 ms in a later run). I kept adaptive because fixed polling's cost grows with every worker, and real jobs take seconds. Later the doorbell (#27) beat both.
 
-## 14. Phase 4: Whisk uses task-queue as a library
+## 14. Whisk uses the queue as a library
 
-- **Decision**: Whisk installs `taskqueue` as a Python package, enqueues chat jobs from its web server, and runs its own worker process with a `whisk_chat` task defined in Whisk's code. Whisk uses its own queue (`whisk`) so the demo workers never pick up chat jobs.
+**In short:** The queue stays generic; Whisk's code, API key and data stay in Whisk.
+
+- **Decision**: Whisk installs `taskqueue` as a package, enqueues chat jobs from its web server, and runs its own worker with a `whisk_chat` task. It uses its own queue name (`whisk`), so demo workers never pick up chat jobs.
 - **Alternatives**:
-  - *Put the chat task inside task-queue*: nothing new to run, but the queue would contain baking-app code, and its workers would need Whisk's API key and database.
-  - *Separate service with an HTTP API*: the most service-like, but the most work: a new API, auth between services, and the chat code still has to run somewhere.
-- **Why**: The queue stays generic infrastructure, and Whisk's secrets and data stay in Whisk. It's how real task libraries are used.
-- **Consequences**: The package was renamed from `src` to `taskqueue`, and importing it no longer loads task-queue's `.env` (only the command-line tools do), so it can't change the host app's settings.
+  - *Put the chat task inside task-queue*: nothing new to run, but the queue would contain baking-app code and need Whisk's secrets.
+  - *A separate service with an HTTP API*: most "real-service," but the most work: a new API, authentication between services, and the chat code still has to run somewhere.
+- **Why**: It's how real task libraries are used.
+- **Consequences**: The package was renamed from `src` to `taskqueue`, and importing it no longer loads task-queue's `.env`, so it can't change Whisk's settings.
 
-## 15. Phase 4: the browser polls for the chat answer
+## 15. The browser checks for the chat answer once a second
 
-- **Decision**: `POST /chat` returns `202 Accepted` with a job ID immediately; the browser checks `GET /chat/<id>` every second until the answer is ready.
+**In short:** The web server answers instantly and stays free; up to a second of extra delay on a multi-second answer isn't noticeable.
+
+- **Decision**: `POST /chat` returns `202 Accepted` with a job ID right away; the browser asks `GET /chat/<id>` every second until it's ready.
 - **Alternatives**:
-  - *Long polling*: answer arrives instantly, but each waiting request holds a server process, which is the problem being fixed.
-  - *Server-Sent Events*: real push and a path to word-by-word streaming, but Whisk's server handles one request per process, so it would need an async server; and with results in PostgreSQL the server would still be polling underneath.
-- **Why**: Keeps the web server free; each check takes milliseconds. Up to 1 second of extra delay on a multi-second answer isn't noticeable.
-- **Tradeoffs accepted**: Extra small requests while waiting, and no word-by-word streaming.
+  - *Long polling*: instant answer, but each waiting request ties up a server process, which is the problem I was fixing.
+  - *Server-Sent Events (push)*: real push and a path to word-by-word streaming, but Whisk's server handles one request per process, so it would need an async server, and the server would still poll PostgreSQL underneath.
+- **Why**: Each check takes milliseconds.
+- **Tradeoffs**: Extra small requests while waiting, and no word-by-word streaming.
 
-## 16. Phase 4: apps read results from PostgreSQL history
+## 16. Apps read results from PostgreSQL history
 
-- **Decision**: Whisk reads a finished job's result from the history database (`taskqueue.results.get_job`). "Not found yet" means still pending.
-- **Alternatives**: *Store results in Redis on the job*: instant and fast, but a core change plus an expiry rule to keep Redis from filling up, and results would be temporary.
-- **Why**: No core queue changes, and results are kept permanently.
-- **Tradeoffs accepted**: History lags Redis slightly (milliseconds when the writer is keeping up), so answers appear a little later. Whisk needs read access to the queue's database, which couples the two systems.
+**In short:** No core queue change, and results are kept forever.
 
-## 17. Idempotency: keys at enqueue, plus result checkpoints
+- **Decision**: Whisk reads a finished job's result from the history database. "Not found yet" means still pending.
+- **Alternatives**: *Store results in Redis*: faster, but a core change plus an expiry rule so Redis doesn't fill up, and results would be temporary.
+- **Why**: Reuses what already exists.
+- **Tradeoffs**: History lags Redis by milliseconds when the writer keeps up, so answers appear slightly later. Whisk needs read access to the queue's database, which ties the two together.
 
-- **Decision**: Both. (1) `enqueue(..., idempotency_key=...)`: a repeated key within 24 hours returns the original job instead of creating a duplicate. The check and the create happen in the same Lua script. (2) When a task succeeds, the worker saves its result on the job only if no result is saved yet (first finisher wins). Before running a task, a worker checks for a saved result and reuses it instead of redoing the work.
+## 17. Idempotency: keys when submitting, checkpoints when running
+
+**In short:** Duplicates come from two places, submitting twice and running twice, so each gets its own fix.
+
+- **Decision**:
+  1. `enqueue(..., idempotency_key=...)`: the same key within 24 hours returns the original job instead of creating a new one. The check and the create are one Lua script, so two requests can't both create one.
+  2. When a task succeeds, its result is saved on the job only if none is saved yet (first finisher wins). Before running a task, a worker reuses a saved result instead of redoing the work.
 - **Alternatives**:
-  - *Keys only*: stops duplicate submissions (double-clicks, client retries) but not a job running twice after a lease expiry.
-  - *Checkpoints only*: stops most re-runs but not two separate jobs created by a double submission.
-- **Why**: The queue is at-least-once, so duplicates come from two places, submission and execution. Each needs its own fix.
-- **Limits accepted**: If a worker's lease expires while it's still running, another worker can start the same job at the same time, and both do the work. Checkpoints keep the recorded result consistent (the first finisher's), but only the external service supporting idempotency keys could stop the second call. Exactly-once execution isn't achievable inside the queue. Checkpoints are kept on the job hash in Redis.
+  - *Keys only*: stops double-clicks and client retries, but not a job running twice after a lease expires.
+  - *Checkpoints only*: stops most re-runs, but not two separate jobs from a double submit.
+- **Why**: The queue is at-least-once (every job runs, sometimes more than once), so both sources need covering.
+- **Limits**: If a frozen worker loses its lease but is still running, another worker can run the same job at the same time. Checkpoints keep the recorded result consistent, but only the outside service (with its own idempotency keys) can stop the second call. Exactly-once isn't possible inside the queue alone.
 
 ## 18. Priority: separate "delayed" and "ready" sets, with aging
 
-- **Decision**: The single `pending` set became two. `delayed` holds jobs waiting on a delay or retry backoff, scored by when they become ready. `ready` holds jobs that can run now, scored by *the time they became ready − priority × 60 s*. Each lease first moves due jobs from `delayed` to `ready`, then takes the lowest score. Any integer priority works; default 0.
+**In short:** Priority only orders jobs that can run now, and a long-waiting job eventually catches up with urgent ones, so nothing starves.
+
+- **Decision**: The single `pending` set became two. `delayed` holds jobs waiting on a delay or backoff, scored by when they're ready. `ready` holds jobs that can run now, scored by *time it became ready − priority × 60 s*. Each lease moves due jobs from `delayed` to `ready`, then takes the lowest score.
 - **Alternatives**:
-  - *One pending set per priority level*: the smallest change, but a fixed number of levels, up to one lookup per level on every lease, and every other part (reaper, replay, metrics) needs to know all the sets.
-  - *Fold priority into the existing score*: one set and almost no code, but it breaks the design: a high-priority job delayed 30 minutes would look ready immediately.
-- **Why**: Any number of levels, first-come-first-served within a level, one lookup per lease, and "score = time" still holds for delayed jobs, so delays and backoff are untouched.
-- **Starvation**: *Aging*, not strict priority. Each priority level is worth 60 seconds of waiting (default, set per queue), so a lower-priority job that has waited longer than that catches up with new higher-priority jobs. Strict priority was simpler but lets a steady stream of urgent jobs block everything else forever. The 60 s step is my default; it's stored once in Redis so every producer and worker uses the same value.
-- **Tradeoffs accepted**: The biggest core change so far (enqueue, lease, retries, reaper, replay and metrics all changed). Each lease does a small "move what's due" step, capped at 1,000 jobs per lease; if more than that become due at the same instant, priority ordering among them is approximate until the backlog clears.
+  - *One set per priority level*: smallest change, but a fixed number of levels, a lookup per level on every lease, and every other part has to know all the sets.
+  - *Fold priority into the existing score*: almost no code, but a high-priority job delayed 30 minutes would look ready immediately.
+- **Why**: Any number of levels, first-come-first-served within a level, one lookup per lease, and delays and backoff don't change.
+- **Starvation**: I chose aging over strict priority. Each level is worth 60 seconds of waiting, so an old low-priority job overtakes new urgent ones eventually. Strict priority lets a steady stream of urgent jobs block everything else forever. The 60 s is stored once in Redis so every producer and worker agrees.
+- **Tradeoffs**: The biggest core change (enqueue, lease, retry, reaper, replay and metrics all changed). The "move what's due" step is capped at 1,000 jobs per lease, so if more than that become due at once, their order is approximate until it catches up.
 
-## 19. Cleanup of finished jobs: a "finished" set plus a batched sweep
+## 19. Cleaning up finished jobs: a "finished" set plus a batched sweep
 
-- **Decision**: On ack, a job joins a `finished` sorted set scored by finish time. `cleanup()` deletes the Redis copy of jobs done more than 24 hours ago and dead-lettered more than 30 days ago (which removes them from the dead-letter queue for good), in batches of 100. Workers run it once a minute. PostgreSQL history keeps every job.
+**In short:** Redis memory stays bounded, including dead jobs nobody ever looks at, while PostgreSQL keeps everything.
+
+- **Decision**: When a job finishes, it joins a `finished` set scored by finish time. Once a minute, workers delete Redis copies of jobs done over 24 hours ago and dead over 30 days ago, 100 at a time.
 - **Alternatives**:
-  - *Auto-expire on ack (Redis EXPIRE)*: one line and no sweep, but dead jobs would still pile up forever if nobody looks at them.
-  - *Delete on ack*: least memory, but a finished job would briefly exist in neither Redis nor history (history lags slightly), so tools couldn't find it. (Its history isn't lost; events wait in the stream.)
-- **Why**: The only option that also bounds an ignored dead-letter queue, and you can see how many finished jobs are waiting to be cleaned.
-- **Tradeoffs accepted**: Another sorted set and Lua script; the sweep is batched like replay so it never blocks Redis. A dead job older than 30 days can no longer be replayed. The 24-hour and 30-day defaults are mine, adjustable per call.
+  - *Expire each job automatically on finish*: one line, but ignored dead jobs would pile up forever.
+  - *Delete on finish*: least memory, but for a moment the job would be in neither Redis nor history (history lags slightly).
+- **Why**: The only option that also limits an ignored dead-letter queue.
+- **Tradeoffs**: Another set and script. A dead job older than 30 days can't be replayed. Jobs that finished before this feature existed weren't in the set, so a one-time script (`scripts/backfill_finished.py`) added about 106,000 of them.
 
-## 20. Time limits for hung tasks: enforced in Redis, stuck worker restarts itself
+## 20. Hung tasks: a time limit enforced in Redis, and the stuck worker restarts itself
 
-- **Decision**: Each job has `timeout_seconds` (default 300, my choice). `lease()` records the start time, and neither the lease nor any heartbeat can push the lease expiry past *start + timeout*. The reaper then treats it as a failed attempt labelled "timed out after N s". The worker's heartbeat thread wakes right at the limit, sees the refusal, and exits the process; Docker's restart policy starts a fresh worker.
+**In short:** No heartbeat can extend a lease past the job's time limit, so a hung task is always caught, even if its code is buggy.
+
+- **Decision**: Each job has `timeout_seconds` (default 300). Neither the lease nor any heartbeat can push the expiry past *start + timeout*. The reaper then counts it as a failed attempt ("timed out after N s"). The stuck worker notices, exits, and Docker restarts it.
 - **Alternatives**:
-  - *Run each task in a child process the worker can kill*: truly stops the hung work and isolates crashes, but starting a process per job adds overhead that would cut throughput on short jobs, and arguments and results must be passable between processes.
-  - *Give tasks a deadline and trust them*: no machinery, but only protects tasks written correctly, not the unexpected hang this is meant to catch.
-- **Why**: It reuses the lease and reaper machinery and is enforced centrally, so buggy task code can't dodge it.
-- **Tradeoffs accepted**: Python can't kill a thread, so the stuck task stops only because its whole worker process exits, which needs a supervisor (Docker here). A worker that loses its lease for any reason now also exits, to stop doing duplicate work. Jobs leased before this change have no limit.
+  - *Run each task in a child process the worker can kill*: really stops the work, but starting a process per job slows short jobs a lot.
+  - *Give tasks a deadline and trust them*: only protects tasks written correctly, not the surprise hang this is for.
+- **Why**: It reuses leases and the reaper, enforced in one place.
+- **Tradeoffs**: Python can't kill a thread, so the hung task only stops because its whole process exits, which needs a supervisor like Docker. A worker that loses its lease for any reason also exits, so it stops doing duplicate work.
 
-## 21. Errors that shouldn't be retried: a per-task list plus `PermanentError`
+## 21. Errors that shouldn't be retried
 
-- **Decision**: Both. A task can be registered as `Task(fn, no_retry=(SomeError, ...))` to list error types that never succeed on retry, and any task can raise `PermanentError` for cases only it can recognize. Either way the worker calls `fail(..., retry=False)`, which sends the job straight to the dead-letter queue in the same atomic script. Unknown task names are now permanent too.
+**In short:** A per-task list of hopeless error types, plus `PermanentError` for cases only the task can recognize; everything else is still retried.
+
+- **Decision**: `Task(fn, no_retry=(SomeError, ...))` lists error types that will never succeed, and any task can raise `PermanentError`. Either way the job goes straight to the dead-letter queue. Unknown task names do too.
 - **Alternatives**:
-  - *Only the exception*: explicit, but every task must catch and convert errors itself, and it's easy to miss one.
-  - *Only a per-task list*: keeps task code clean, but matches by type only, so it can't handle cases where the same exception type is sometimes temporary and sometimes not.
-  - *Classify automatically by exception type*: no work for task authors, but it guesses wrong and is hard to defend.
-- **Why**: The list covers whole error types in one visible place; the exception covers the edge cases, because the task knows its own errors. Unlisted errors are still retried, so the safe default stays "retry."
-- **Tradeoffs accepted**: Two mechanisms to explain. A wrongly-listed error type dead-letters jobs that might have succeeded; replay recovers them.
+  - *Only the exception*: every task must catch and convert errors itself, and it's easy to miss one.
+  - *Only the list*: matches by type only, but sometimes the same type is temporary one time and permanent the next.
+  - *Guess from the exception type automatically*: it guesses wrong and is hard to defend.
+- **Why**: In Whisk, a bad API key (401) fails immediately instead of costing 2 more Claude calls, while "overloaded" (529) is still retried.
+- **Tradeoffs**: Two mechanisms to explain. Listing the wrong error dead-letters jobs that might have worked, but replay recovers them.
 
 ## 22. Worker registry: a sorted set scored by "last seen"
 
-- **Decision**: Each worker checks in about once a second from its own presence thread: `tq:<queue>:workers` (score = last check-in) plus a small status record (host, current job, jobs done and failed). A worker silent for 5 s shows as dead; after 60 s the reaper removes it. A clean shutdown removes the worker immediately, so only crashes, kills and timeouts show as dead.
+**In short:** The dashboard can show each worker working, dying (red), and being removed.
+
+- **Decision**: Each worker checks in about once a second from its own thread, with a small status record (current job, done and failed counts). Silent for 5 s means dead; after 60 s it's removed. A clean shutdown removes it right away, so only crashes show as dead.
 - **Alternatives**:
-  - *One self-expiring key per worker*: no cleanup code, but a dead worker just vanishes (you can't show it dying), and listing workers means scanning all of Redis.
-  - *No registry; show running jobs*: no core change, but idle workers are invisible and there's no worker identity.
-- **Why**: It shows the whole cycle, working → dead → removed, and reuses the "score = time" pattern. Listing workers is one sorted-set read.
-- **Details**: Check-ins come from a separate thread because a busy worker's main thread is stuck inside the task (job heartbeats are only every 10 s). The worker ID has a random suffix so a restarted container doesn't look like the worker that died.
-- **Tradeoffs accepted**: One more structure and a removal rule. The registry is for visibility only; nothing in job processing depends on it.
+  - *One self-expiring key per worker*: no cleanup code, but dead workers just vanish, and listing them means scanning all of Redis.
+  - *No registry; show running jobs*: idle workers would be invisible.
+- **Why**: Same "score = time" pattern; listing workers is one read.
+- **Details**: Check-ins use a separate thread because a busy worker's main thread is stuck inside the task. Worker IDs have a random part so a restarted container doesn't look like the one that died.
+- **Tradeoffs**: One more structure. It's for visibility only; nothing in job processing depends on it.
 
-## 23. Discard dead jobs, and record it in history
+## 23. Discarding dead jobs, recorded in history
 
-- **Decision**: `discard(job_id)` and `discard_dead(error_contains=...)` remove dead jobs from the dead-letter queue and delete their Redis data, writing a `discarded` event in the same atomic script. The history writer sets the job's status to `discarded` with a `discarded_at` time. Batched like replay; only dead jobs can be discarded.
+**In short:** Free the dead-letter queue now, but history still shows what was given up on and when.
+
+- **Decision**: `discard(job_id)` and `discard_dead(error_contains=...)` delete dead jobs from Redis and write a `discarded` event in the same script. History marks them `discarded` with a time.
 - **Alternatives**:
-  - *Delete from Redis only*: smallest change, but history would still say `dead`, so it couldn't tell "waiting for a person" from "a person gave up."
-  - *Archive instead of delete*: allows undo, but memory isn't freed until cleanup, and replay already gives a second chance.
-- **Why**: Frees the dead-letter queue right away while keeping an audit trail of what was given up on and when. Every change is still an event.
-- **Tradeoffs accepted**: A schema change (new `discarded` status and column) and one more event type. Neither option deletes history; history is permanent.
+  - *Delete from Redis only*: history would still say `dead`, so you couldn't tell "waiting for a person" from "a person gave up."
+  - *Archive instead of delete*: allows undo, but memory isn't freed, and replay already gives a second chance.
+- **Why**: An audit trail for free, since every change is already an event.
+- **Tradeoffs**: A schema change and one more event type.
 
-## 24. Backpressure: refuse new jobs when the queue is full
+## 24. Backpressure: say no when the queue is full
 
-- **Decision**: The enqueue script refuses a new job with `QueueFull` once `max_waiting` jobs (ready plus delayed) are waiting; default 100,000. The count and the insert are one atomic step, so concurrent producers can't overshoot. Payloads over 64 KB raise `PayloadTooLarge`. A repeated idempotency key still returns its original job when full, since no new job is created. Redis runs with `maxmemory 512mb` and `noeviction` as a last-resort backstop. Defaults are mine, adjustable per queue.
+**In short:** When overloaded, refuse new jobs with a clear error instead of letting Redis run out of memory.
+
+- **Decision**: Enqueue raises `QueueFull` once 100,000 jobs are waiting; counting and adding are one atomic step, so producers can't overshoot. Payloads over 64 KB raise `PayloadTooLarge`. Redis itself is capped at 512 MB and refuses writes rather than silently deleting data.
 - **Alternatives**:
-  - *Make producers wait for space*: no new error handling, but it only moves the backlog into the producers. In Whisk, web requests would hang, which is the problem the queue was built to fix.
-  - *Load shedding by priority*: keeps urgent work flowing, but the most complex, and pushing out already-accepted jobs breaks the promise that an accepted job is never lost.
-- **Why**: Overload becomes visible to the caller, who can respond sensibly (Whisk says "busy, try again in a minute"), and Redis memory, which also holds the history outbox, stays protected.
-- **Tradeoffs accepted**: Every producer must handle `QueueFull`; one that ignores it loses that work.
+  - *Make producers wait for space*: in Whisk, web requests would hang, which is what the queue was built to fix.
+  - *Drop low-priority jobs to make room*: keeps urgent work flowing, but throwing away accepted jobs breaks the promise that an accepted job is never lost.
+- **Why**: The caller can respond sensibly (Whisk says "busy, try again in a minute"), and Redis memory, which also holds the history events, stays safe.
+- **Tradeoffs**: Every producer must handle `QueueFull`.
 
-## 25. One active history writer: Redis lock plus a fencing token checked in PostgreSQL
+## 25. One active history writer: a Redis lock plus a fencing token
 
-- **Decision**: History writers compete for a Redis lock (`SET NX PX`, 10 s expiry, renewed about every 3 s only by the holder). Each new holder gets the next number from a counter: the fencing token. Every batch transaction first records its token in a `history_fence` table in PostgreSQL, but only if no newer token exists; otherwise the batch is rejected and rolled back. Writers without the lock wait on standby and take over when it expires. All writers share one consumer name, so a new holder picks up its predecessor's unconfirmed events.
+**In short:** The lock decides who *should* write; the fencing token makes sure a writer that froze and lost the lock *can't*.
+
+- **Decision**: Writers compete for a Redis lock that expires in 10 s and is renewed every ~3 s. Each new holder gets the next number from a counter (the fencing token). Every batch first records its token in PostgreSQL, but only if no higher token exists; otherwise the batch is rejected. Other writers wait on standby and take over when the lock expires.
 - **Alternatives**:
-  - *Redis lock with expiry only*: simple, but a writer that freezes past the expiry can wake up and write one more batch after a standby took over, so two writers write at once.
-  - *PostgreSQL advisory lock on the write connection*: correct by construction and little code, but a writer that's frozen yet still connected keeps the lock, so history stalls until the connection times out.
-- **Why**: Correct even when a writer freezes, with failover in about 10 s. It's the same idea as job lease tokens, applied to the writer: a lock with a timeout decides who *should* write; the fencing token makes sure a stale writer *can't*.
-- **Tradeoffs accepted**: The most moving parts of the three (a lock, renewals, a token table, and a check in every batch). Like the advisory lock, it relies on PostgreSQL for the final check, which is fine because the writer only writes to PostgreSQL.
-- **Verified**: in Docker with two writers, killing the active one with SIGKILL: the standby took over with the next token and drained the backlog.
+  - *Redis lock only*: a writer that freezes past the expiry can wake up and write one more batch after someone else took over.
+  - *PostgreSQL advisory lock*: little code, but a writer that's frozen yet still connected keeps the lock, and history stalls.
+- **Why**: Correct even when a writer freezes, with failover in about 10 s. It's the same idea as lease tokens on jobs, applied to the writer.
+- **Tradeoffs**: The most moving parts of the three.
+- **Verified**: Killing the active writer with SIGKILL: the standby took over with the next token and caught up.
 
-## 26. Graceful shutdown: wait up to 25 s, then hand the job back
+## 26. Graceful shutdown: finish within 25 s, otherwise hand the job back
 
-- **Decision**: On a stop signal the worker keeps running its current job for up to `SHUTDOWN_GRACE_SECONDS` (25 s, inside Docker's 30 s stop window). If the job finishes, it's acked normally. If not, the worker calls `release()`, which returns the job to the ready set with its attempt undone and its priority kept (one atomic script, lease-token checked), and the process exits. History records the attempt as `released`, not a failure.
+**In short:** Short jobs finish during a deploy, long ones go back to the queue without using up an attempt, and deploys stay fast.
+
+- **Decision**: On a stop signal, the worker keeps running its current job for up to 25 s (inside Docker's 30 s window). If the job doesn't finish, the worker calls `release()`: the job goes back to the ready set with its attempt undone and its priority kept. History records it as `released`, not a failure.
 - **Alternatives**:
-  - *Stop window as long as the longest job*: no code and no repeated work, but a deploy could take 5+ minutes.
-  - *Hand back immediately*: fast deploys, but every in-progress job is thrown away and redone, even ones a second from finishing.
-- **Why**: Short jobs (the common case) finish without repeated work; long ones are handed back without losing an attempt; deploy time stays bounded.
-- **Tradeoffs accepted**: Long jobs are still redone from the start (at-least-once). If a job finishes at the same moment it's released, the token check lets only one win; if the release wins, the next worker reuses the saved result checkpoint instead of redoing it.
-- **Verified**: `docker stop` on a worker running a 40 s job: it waited 25 s, handed the job back, exited with code 0, and another worker took it as attempt 1.
+  - *Make the stop window as long as the longest job*: no code, but a deploy could take 5+ minutes.
+  - *Hand back immediately*: fast, but throws away work that was a second from finishing.
+- **Why**: The common case (short jobs) loses no work; deploy time stays bounded.
+- **Tradeoffs**: Long jobs still restart from scratch. If a job finishes at the same moment it's released, the lease token lets only one win. Whisk sets this to 50 s because its Claude calls can take 45 s.
+- **Verified**: `docker stop` during a 40 s job: it waited 25 s, handed the job back, exited cleanly, and another worker ran it as attempt 1.
 
-## 27. A doorbell instead of polling (supersedes #13 as the default)
+## 27. A doorbell instead of polling
 
-- **Decision**: Whenever a job becomes ready, the shared `schedule()` Lua helper also pushes a token onto `tq:<queue>:wake` (capped at 1,000). Idle workers block on `BLPOP` until a token arrives or the next delayed job is due (at most 1 s, so they still reap and notice stop requests). Each job's token is used exactly once: by the worker the doorbell woke, or by the lease script when a busy worker grabs the job directly. Polling remains available (`WAKE_MODE=poll`) for comparison.
+**In short:** Each new job drops one token in a Redis list; one idle worker wakes for it, and idle workers send nothing while they wait.
+
+- **Decision**: When a job becomes ready, the script also pushes a token onto `tq:<queue>:wake`. Idle workers block on `BLPOP` until a token arrives (at most 1 s, so they still do housekeeping). Each token is used exactly once: by the worker it woke, or by the lease script if a busy worker took the job first.
 - **Alternatives**:
-  - *Publish/subscribe*: nothing stored, but every idle worker wakes for every job (thundering herd), and messages sent while a worker is mid-check are lost.
-  - *Redis keyspace notifications*: no script changes, but the same herd and lost-message problems, plus a server setting that's off by default.
-- **Why**: One job wakes one worker, waiting workers send nothing, and the sorted sets stay the source of truth, so a missed or extra token is harmless.
-- **A bug found by measuring**: my first version only removed tokens when idle workers popped them. Under moderate load, busy workers grabbed jobs directly, tokens piled up at the 1,000 cap, and `BLPOP` never actually waited. The fix was making the lease script consume a token too. Found by watching the list length during a benchmark (pinned at 1,000), not by tests; there's now a regression test.
-- **Result**: p50 21 ms and p99 about 23 ms at 4–16 workers, the best and most consistent of all modes, with the lowest idle load (293 vs 338 adaptive and 1,667 for 50 ms polling, 16 workers).
-- **Tradeoffs accepted**: Each waiting worker holds a Redis connection. A worker that takes a token and crashes before leasing loses it; the 1 s wait cap bounds the delay. The doorbell key is derived inside the script, like the job keys (single-Redis limitation).
+  - *Publish/subscribe*: every idle worker wakes for every job (thundering herd), and messages sent while a worker isn't listening are lost.
+  - *Redis keyspace notifications*: the same problems, plus a server setting that's off by default.
+- **Why**: One job wakes one worker. The sorted sets are still the source of truth, so a missed or extra token is harmless.
+- **A bug I found by measuring**: in my first version, only idle workers removed tokens. Under load, busy workers took jobs directly, tokens piled up to the 1,000 cap, and workers never actually waited. Tests passed; I caught it by watching the list stuck at 1,000 during a benchmark. Now the lease script uses up a token too, and a regression test covers it.
+- **Result**: p99 about 23 ms at 4–16 workers, the best and most consistent of every mode, with the lowest idle load (293 Redis requests/sec vs 1,667 for 50 ms polling, 16 workers).
+- **Tradeoffs**: Each waiting worker holds a Redis connection. A worker that crashes holding a token loses it, but the 1 s cap limits the delay.
 
-## 28. History writer: write each batch's final state in bulk, with the old path as fallback
+## 28. The history writer writes each batch in bulk, with the old way as a fallback
 
-- **Decision**: For each batch, the writer walks the events in stream order and works out each job's and each attempt's final state in Python, then writes it with four bulk statements (`unnest` arrays): insert new jobs, insert new attempts, finish attempts, update jobs. The whole fast path runs inside a savepoint. If it fails for any reason except a PostgreSQL outage, it's rolled back and the batch is applied one event at a time as before, which finds the bad event, counts its failure and eventually sets it aside.
+**In short:** Work out every job's final state for the batch, write it in 4 bulk statements, and fall back to one event at a time only if something's wrong.
+
+- **Decision**: For each batch, the writer goes through the events in order, works out where each job and attempt ends up, and writes that with 4 statements: insert new jobs, insert new attempts, finish attempts, update jobs. If that fails for any reason except PostgreSQL being down, it's undone and the batch runs one event at a time as before, which finds the bad event (#12).
 - **Alternatives**:
-  - *Pipeline mode*: send the same per-event statements without waiting for each reply, and drop the per-event savepoints. The smallest change, but still several statements per event, so probably only a few times faster.
-  - *Several streams, one writer each*: split events by job id across N streams, each with its own lock and fencing token. Scales by adding writers, but multiplies the machinery from #25.
-- **Why**: Measuring showed the cost was per event (batch size made no difference), so cutting statements per event was the lever. One writer is now 15–27× faster, comfortably above what the workers can produce, without adding writers.
-- **Tradeoffs accepted**: More logic: the fold has to mirror the per-event rules exactly (for example, a replay clears `finished_at`, and a job keeps its last error while it's retried). A test applies a messy workload with every event type both ways, in batch sizes from 1 to all events, and checks that the rows are identical. A deliberately broken fold failed that test. A batch containing a bad event costs one failed fast attempt before the slow path runs.
-- **Result**: 950 → 14,405 events/s at batch size 100 (317 → 4,802 jobs/s); about 23,900 events/s at 500–1,000.
+  - *Pipeline mode*: send the same per-event statements without waiting for each reply. Smallest change, but still several statements per event.
+  - *Several streams, one writer each*: scales by adding writers, but multiplies the lock and token machinery from #25.
+- **Why**: Measuring showed the cost was per event (bigger batches didn't help), so I cut the statements per event.
+- **Tradeoffs**: The bulk version has to follow exactly the same rules as the per-event version. A test applies a messy workload both ways, in batch sizes from 1 to all events, and checks the rows are identical. I broke the bulk version on purpose to make sure the test catches it.
+- **Result**: 950 → 14,405 events/s at the default batch size (317 → 4,802 jobs/s), 15× faster, now well above what the workers produce.
