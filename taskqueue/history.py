@@ -126,8 +126,11 @@ class HistoryWriter:
         with self.conn.transaction():  # all events in the batch commit together
             if self.token is not None:
                 self._check_fence()
-            for entry_id, fields in entries:
-                self._apply_or_dead_letter(entry_id, fields)
+            if not self._try_fast_path(entries):
+                # Slow, careful path: one event at a time, so a bad event can be
+                # found, counted, and eventually set aside.
+                for entry_id, fields in entries:
+                    self._apply_or_dead_letter(entry_id, fields)
 
         # Only now, after the commit, tell Redis they're handled.
         ids = [entry_id for entry_id, _ in entries]
@@ -135,6 +138,138 @@ class HistoryWriter:
         self.r.xdel(self.stream, *ids)  # free the memory; PostgreSQL has them now
         self.r.hdel(self.failures_key, *ids)  # forget any failure counts
         return len(entries)
+
+    def _try_fast_path(self, entries: list) -> bool:
+        """Apply the whole batch with a few bulk statements. False = it failed and
+        nothing was written, so the caller should use the per-event path."""
+        try:
+            with self.conn.transaction():  # SAVEPOINT: a failure undoes only this attempt
+                events = [{k.decode(): v.decode() for k, v in fields.items()}
+                          for _, fields in entries]
+                self._apply_batch(events)
+            return True
+        except psycopg.OperationalError:
+            raise  # PostgreSQL is down: the slow path wouldn't do any better
+        except Exception as e:
+            # Some event in the batch is bad. We don't know which one, so let the
+            # per-event path find it (and count its failure).
+            log.info("fast path failed (%s: %s); applying batch event by event",
+                     type(e).__name__, e)
+            return False
+
+    def _apply_batch(self, events: list[dict]) -> None:
+        """Write a batch of events with a few bulk statements instead of several per event.
+
+        Gives the same result as calling _apply() on each event in order:
+        1. Walk the events in stream order and work out each job's and each
+           attempt's FINAL state in this batch (later events overwrite earlier ones,
+           the same way the per-event UPDATEs would).
+        2. Write those final states: new jobs, then new attempts (they need their
+           job to exist), then finished attempts, then job updates.
+        Events for different jobs don't affect each other, so only the order
+        within one job matters, and step 1 keeps it.
+        """
+        new_jobs = {}      # job_id -> row for INSERT (first 'enqueued' wins, like DO NOTHING)
+        new_attempts = {}  # lease_token -> row for INSERT
+        finished = {}      # lease_token -> (ts, outcome, error); last one wins
+        jobs = {}          # job_id -> final state from this batch's events
+
+        for e in events:
+            kind, job_id, ts = e["type"], e["job_id"], float(e["ts"])
+            if kind == "enqueued":
+                json.loads(e["payload"])  # reject bad JSON here, before any SQL runs
+                new_jobs.setdefault(job_id, (job_id, e["queue"], e["payload"],
+                                             int(e["max_attempts"]), int(e.get("priority", 0)), ts))
+                continue
+            if kind == "leased":
+                new_attempts.setdefault(e["lease_token"],
+                                        (e["lease_token"], job_id, int(e["attempt"]), ts))
+            elif kind == "acked":
+                finished[e["lease_token"]] = (ts, "done", None)
+            elif kind in ("failed", "lease_expired"):
+                outcome = "error" if kind == "failed" else "lease_expired"
+                finished[e["lease_token"]] = (ts, outcome, e["error"])
+            elif kind == "released":
+                finished[e["lease_token"]] = (ts, "released", None)
+            elif kind not in ("replayed", "discarded"):
+                log.warning("unknown event type %r, skipping", kind)
+                continue
+
+            # The job's state after this event. Fields mirror _set_job():
+            # result/last_error keep the latest value set; finish = keep/set/clear.
+            job = jobs.setdefault(job_id, {"result": None, "last_error": None,
+                                           "finish": "keep", "finished_ts": None,
+                                           "discarded_ts": None})
+            job["ts"] = ts
+            if kind == "leased":
+                job["status"] = "leased"
+            elif kind == "acked":
+                job.update(status="done", result=e["result"], finish="set", finished_ts=ts)
+                json.loads(e["result"])  # reject bad JSON here, before any SQL runs
+            elif kind in ("failed", "lease_expired"):
+                dead = e["outcome"] == "dead"
+                job.update(status="dead" if dead else "pending", last_error=e["error"])
+                if dead:
+                    job.update(finish="set", finished_ts=ts)
+            elif kind == "released":
+                job["status"] = "pending"
+            elif kind == "replayed":
+                job.update(status="pending", finish="clear", finished_ts=None)
+            elif kind == "discarded":
+                job.update(status="discarded", discarded_ts=ts)
+
+        sql = self.conn.execute
+        # unnest() turns parallel arrays into rows, so one statement covers many jobs.
+        if new_jobs:
+            ids, queues, payloads, max_attempts, priorities, tss = zip(*new_jobs.values())
+            sql("""INSERT INTO jobs (id, queue, payload, status, max_attempts, priority,
+                                     created_at, updated_at)
+                   SELECT id, queue, payload::jsonb, 'pending', max_attempts, priority,
+                          to_timestamp(ts), to_timestamp(ts)
+                   FROM unnest(%s::uuid[], %s::text[], %s::text[], %s::int[], %s::int[],
+                               %s::float8[]) AS t(id, queue, payload, max_attempts, priority, ts)
+                   ON CONFLICT (id) DO NOTHING""",
+                (list(ids), list(queues), list(payloads), list(max_attempts),
+                 list(priorities), list(tss)))
+        if new_attempts:
+            tokens, job_ids, numbers, tss = zip(*new_attempts.values())
+            # The EXISTS check skips jobs created before history existed, as _apply() does.
+            sql("""INSERT INTO job_attempts (lease_token, job_id, attempt_number, started_at)
+                   SELECT t.token, t.job_id, t.number, to_timestamp(t.ts)
+                   FROM unnest(%s::uuid[], %s::uuid[], %s::int[], %s::float8[])
+                        AS t(token, job_id, number, ts)
+                   WHERE EXISTS (SELECT 1 FROM jobs WHERE id = t.job_id)
+                   ON CONFLICT (lease_token) DO NOTHING""",
+                (list(tokens), list(job_ids), list(numbers), list(tss)))
+        finished = {t: v for t, v in finished.items() if t}  # empty token matches nothing
+        if finished:
+            tss, outcomes, errors = zip(*finished.values())
+            sql("""UPDATE job_attempts a SET finished_at = to_timestamp(t.ts),
+                          outcome = t.outcome, error = t.error
+                   FROM unnest(%s::uuid[], %s::float8[], %s::text[], %s::text[])
+                        AS t(token, ts, outcome, error)
+                   WHERE a.lease_token = t.token""",
+                (list(finished), list(tss), list(outcomes), list(errors)))
+        if jobs:
+            rows = [(job_id, j["status"], j["ts"], j["result"], j["last_error"], j["finish"],
+                     j["finished_ts"], j["discarded_ts"]) for job_id, j in jobs.items()]
+            (ids, statuses, tss, results, last_errors, finishes,
+             finished_tss, discarded_tss) = zip(*rows)
+            sql("""UPDATE jobs j SET
+                       status = t.status,
+                       updated_at = to_timestamp(t.ts),
+                       result = COALESCE(t.result::jsonb, j.result),
+                       last_error = COALESCE(t.last_error, j.last_error),
+                       finished_at = CASE t.finish WHEN 'set' THEN to_timestamp(t.finished_ts)
+                                                   WHEN 'clear' THEN NULL
+                                                   ELSE j.finished_at END,
+                       discarded_at = COALESCE(to_timestamp(t.discarded_ts), j.discarded_at)
+                   FROM unnest(%s::uuid[], %s::text[], %s::float8[], %s::text[], %s::text[],
+                               %s::text[], %s::float8[], %s::float8[])
+                        AS t(id, status, ts, result, last_error, finish, finished_ts, discarded_ts)
+                   WHERE j.id = t.id""",
+                (list(ids), list(statuses), list(tss), list(results), list(last_errors),
+                 list(finishes), list(finished_tss), list(discarded_tss)))
 
     def _apply_or_dead_letter(self, entry_id: bytes, fields: dict) -> None:
         try:

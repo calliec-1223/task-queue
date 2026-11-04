@@ -36,7 +36,7 @@ flowchart LR
 - **Discard**: jobs that will never succeed can be removed from the dead-letter queue (one, or every job whose error matches). History records them as `discarded`, so nothing is lost.
 - **Dead-letter replay**: after fixing the cause of an outage, replay one dead job or every job whose error matches. Bulk replay runs in small batches so Redis never stalls the workers.
 - **Single active history writer**: writers compete for a Redis lock and the holder writes; a fencing token checked in PostgreSQL rejects any batch from a writer that froze and was replaced, so history stays in order even during failover.
-- **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
+- **Durable job history**: every attempt is recorded in PostgreSQL, including attempts before a replay. Each batch is written with a few bulk statements, and writes are idempotent, so a crashed history writer can safely re-apply events. A malformed event is retried 3 times, then set aside in a `dead_events` table so it can't block history.
 - **Idempotency keys**: submitting a job with the same key twice returns the original job instead of a duplicate. The check and the create are one atomic script, so even simultaneous submissions create one job.
 - **Result checkpoints**: a finished task's result is saved before the ack. If the job is redelivered (the worker crashed or lost its lease before acking), the next worker reuses the result instead of redoing the work.
 - **Permanent errors**: errors that can never succeed (bad input, invalid credentials) skip the retries and go straight to the dead-letter queue. A task lists such error types (`Task(fn, no_retry=(...))`) or raises `PermanentError` itself.
@@ -172,7 +172,19 @@ The doorbell has the best median and the best, most consistent p99 (about 23 ms 
 
 Interrupted jobs were recovered by lease expiry and finished on a later attempt. Some kills hit idle workers, which is why there are fewer interrupted jobs than kills. Every job appears exactly once in PostgreSQL history, despite the history writer being killed 5 times.
 
-Reproduce: `docker compose up -d --build`, then `python -m bench.benchmark`, `python -m bench.idle_load`, `python -m bench.chaos`, and `python -m bench.plot`.
+### History writer: 16× faster by writing each batch in bulk
+
+`python -m bench.history_throughput` fills a separate queue with 20,000 finished jobs (60,000 events), then times one history writer draining it.
+
+| Batch size | Before: one event at a time | After: bulk per batch | Speedup |
+|---|---|---|---|
+| 100 (default) | 950 events/s (317 jobs/s) | 14,405 events/s (4,802 jobs/s) | 15× |
+| 500 | 898 events/s (299 jobs/s) | 23,819 events/s (7,940 jobs/s) | 27× |
+| 1,000 | 878 events/s (293 jobs/s) | 23,918 events/s (7,973 jobs/s) | 27× |
+
+Before, each event cost several PostgreSQL round trips plus a savepoint, so the writer capped history at about 300 jobs/s, below the 668 jobs/s the workers reach. Now the writer works out each job's final state for the batch in Python and writes it with four bulk statements. If a batch fails (for example, one malformed event), it falls back to one event at a time to find the bad event and set it aside. A test checks that both ways give identical rows.
+
+Reproduce: `docker compose up -d --build`, then `python -m bench.benchmark`, `python -m bench.idle_load`, `python -m bench.chaos`, `python -m bench.history_throughput`, and `python -m bench.plot`.
 
 ## Real-world use: Whisk's AI baking assistant
 
@@ -199,7 +211,7 @@ Load test: Whisk on gunicorn with 2 server processes. Some users chat back to ba
 These are deliberate tradeoffs or not-yet-built pieces, not bugs:
 
 - **Redis is a single point of failure.** There's no replica or failover. Redis saves every write to disk once per second, so a restart keeps the queue, but if the whole machine crashes, up to about 1 second of changes can be lost (jobs and their history events are lost together, so they never disagree).
-- **One active history writer per queue.** Events for a job must be applied in order, so only one writer writes at a time (others wait on standby and take over within about 10 s; a fencing token stops a frozen writer from writing late). That caps how fast history can be written: **measured at about 900 events/sec (about 300 jobs/sec)** with `python -m bench.history_throughput`, below the 668 jobs/sec the workers can finish at 16 workers. Above that, history lags and events wait in Redis memory (nothing is lost, and the queue itself isn't slowed). Bigger batches didn't help, so the cost is per event.
+- **One active history writer per queue.** Events for a job must be applied in order, so only one writer writes at a time (others wait on standby and take over within about 10 s; a fencing token stops a frozen writer from writing late). One writer handles about 4,800 jobs/sec (see benchmarks), well above what the workers finish today, but it's still a ceiling: above it, history lags and events wait in Redis memory (nothing is lost, and the queue itself isn't slowed).
 - **Single Redis server only.** The Lua scripts build some key names inside the script, which Redis Cluster doesn't allow, so scaling past one Redis server would mean redesigning the key layout.
 - **At-least-once, not exactly-once.** If a worker freezes long enough to lose its lease but is still alive, another worker can run the same job at the same time. Result checkpoints keep the recorded result consistent, but both runs do the work.
 

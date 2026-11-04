@@ -173,6 +173,11 @@ def test_poison_event_is_dead_lettered_and_unblocks_history(r, pg):
     assert r.hlen(writer.failures_key) == 0
 
 
+def flaky_batch_always_fails(events):
+    """Force the per-event path, so a test can make one event fail there."""
+    raise RuntimeError("force the per-event path")
+
+
 def test_event_that_fails_once_is_retried_not_dead_lettered(r, pg, monkeypatch):
     """A one-off glitch gets another chance (why we picked retry-N-times)."""
     from taskqueue.history import EventFailed
@@ -189,6 +194,7 @@ def test_event_that_fails_once_is_retried_not_dead_lettered(r, pg, monkeypatch):
             raise RuntimeError("one-off glitch")
         real_apply(event)
     monkeypatch.setattr(writer, "_apply", flaky)
+    monkeypatch.setattr(writer, "_apply_batch", flaky_batch_always_fails)
 
     with pytest.raises(EventFailed):
         writer.process_once()
@@ -208,6 +214,7 @@ def test_postgres_outage_does_not_count_as_event_failure(r, pg, monkeypatch):
     def down(event):
         raise psycopg.OperationalError("connection refused")
     monkeypatch.setattr(writer, "_apply", down)
+    monkeypatch.setattr(writer, "_apply_batch", down)  # an outage hits the fast path first
     for _ in range(3):
         with pytest.raises(psycopg.OperationalError):
             writer.process_once()
