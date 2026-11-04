@@ -6,6 +6,10 @@ A distributed task queue built from scratch in Python, using Redis for the queue
 
 > Status: all six reliability features are built (leases, retries with backoff, dead-letter queue, idempotency, delayed and priority jobs, benchmarks and failure tests), plus PostgreSQL history and a real integration with my recipe app.
 
+![Dashboard demo: submitting jobs, killing a worker mid-job, and the job recovering on attempt 2](docs/demo.gif)
+
+*Live dashboard in demo mode: jobs are submitted, a worker is killed mid-job (it turns red), its job's lease expires and another worker finishes it on attempt 2, and two always-failing jobs are dead-lettered, replayed, and dead-lettered again.*
+
 ## Architecture
 
 ```mermaid
